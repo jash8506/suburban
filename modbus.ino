@@ -126,7 +126,7 @@ void loop() {
   if (client) {
     HttpClient http = HttpClient(client, Ethernet.localIP(), port);
     IPAddress clientIP = client.remoteIP();
-    if (DEBUG) {
+    if (DEBUG_MODE) {
       Serial.println("Client with address " + clientIP.toString() + " available.");
     }
 

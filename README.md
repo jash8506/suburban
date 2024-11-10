@@ -25,3 +25,5 @@ Rather than pay Fronius a monthly fee to monitor my usage, I'm doing it myself. 
   - InfluxDB
   - Grafana
   - Cloudflare reverse proxy to connect from anywhere.
+## notes
+example_grafana_dashboard.json shows how to set up a dashboard with 2 y axes and aggregate function on query.

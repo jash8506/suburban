@@ -1,3 +1,5 @@
+# shell file with tokens
+start.sh
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

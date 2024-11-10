@@ -32,4 +32,4 @@ example_grafana_dashboard.json shows how to set up a dashboard with 2 y axes and
 ### restart python script on reboot
 `crontab -e`
 then append
-`@reboot /opt/anaconda3/bin/python /home/john/Desktop/suburban/start.sh`
+`@reboot /home/john/Desktop/suburban/start.sh`

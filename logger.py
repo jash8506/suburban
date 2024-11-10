@@ -1,44 +1,107 @@
-import minimalmodbus as mb
-import influxdb
-import time
-import struct
-import threading
 import datetime
+import os
+import random
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
-time.sleep(30)
-meter=mb.Instrument('/dev/ttyUSB0',1,mode='rtu')
-meter.serial.baudrate=9600
-meter.serial.timeout=0.1
-db_client=influxdb.InfluxDBClient('localhost', database='dwelling')
+import influxdb_client
+import requests
 
-def log_to_influx(meter, db_client):
-    threading.Timer(1.0, log_to_influx, args=[meter, db_client]).start()
+# from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.write_api import SYNCHRONOUS
+
+token = os.environ.get("INFLUXDB_TOKEN")
+org = "fern"
+db_client = influxdb_client.InfluxDBClient(
+    url="http://localhost:8086", token=token, org=org
+)
+bucket = "home"
+write_api = db_client.write_api(write_options=SYNCHRONOUS)
+
+
+EMPTY_ENTRY = {
+    "inverter_power": None,
+    # negative is export
+    "meter_power": None,
+    "meter_volts": None,
+    "meter_amps": None,
+    "meter_va": None,
+    "meter_var": None,
+    "meter_w_dmd": None,
+    "meter_w_dmd_peak": None,
+    "meter_pf": None,
+    "meter_hz": None,
+}
+
+
+def get_dummy_entry():
+    return {
+        "inverter_power": random.random() * 10000,
+        "meter_power": random.random() * 10000,
+        "meter_volts": random.random() * 10000,
+        "meter_amps": random.random() * 10000,
+        "meter_va": random.random() * 10000,
+        "meter_var": random.random() * 10000,
+        "meter_w_dmd": random.random() * 10000,
+        "meter_w_dmd_peak": random.random() * 10000,
+        "meter_pf": random.random() * 10000,
+        "meter_hz": random.random() * 10000,
+    }
+
+
+def fetch_json(url):
     try:
-        reg_list=meter.read_registers(0,32, functioncode=4)
-        v,i,w,va,var,pf = [struct.unpack('>f', struct.pack('>HH', *reg_list[a:a+2]))[0] for a in range(0,31,6)]
-        reg_list=meter.read_registers(70,10,functioncode=4)
-        hz,kwh_imp,kwh_exp,kvarh_imp,kvarh_exp = [struct.unpack('>f', struct.pack('>HH', *reg_list[a:a+2]))[0] for a in range(0,9,2)] 
-        json_body = [
-            {
-                "measurement": "grid",
-                "time": datetime.datetime.utcnow().isoformat()[:-7]+'Z',
-                "fields": {
-                    "V": v,
-                    "I": i,
-                    "W": w,
-                    "VA": va,
-                    "VAR": var,
-                    "PF": pf,
-                    "Hz": hz,
-                }
-            },
-        ]
-        db_client.write_points(json_body)
+        response = requests.get(url)
+        return response.json()
+    except:
+        return None
+
+
+def log_to_influx(db_client):
+    # schedule the next attempt
+    threading.Timer(0.5, log_to_influx, args=[db_client]).start()
+    try:
+        # parallel fetches for inverter and power monitor. Failure should return None
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            power_mon_json, inverter_json = executor.map(
+                fetch_json,
+                [
+                    "http://192.168.1.83:80/power",
+                    "http://192.168.1.50/solar_api/v1/GetInverterRealtimeData.cgi",
+                ],
+            )
+        payload = EMPTY_ENTRY.copy()
+        if inverter_json:
+            payload["inverter_power"] = inverter_json["Body"]["Data"]["PAC"]["Values"][
+                "1"
+            ]
+        if power_mon_json:
+            # scaling factors from https://www.gavazzionline.com/pdf/EM511%20CP%20Rev1.8.pdf
+            payload["meter_power"] = power_mon_json["W"] / 10
+            payload["meter_volts"] = power_mon_json["V"] / 10
+            payload["meter_amps"] = power_mon_json["A"] / 1000
+            payload["meter_va"] = power_mon_json["VA"] / 10
+            payload["meter_var"] = power_mon_json["VAR"] / 10
+            payload["meter_w_dmd"] = power_mon_json["W dmd"] / 10
+            payload["meter_w_dmd_peak"] = power_mon_json["W dmd peak"] / 10
+            payload["meter_pf"] = power_mon_json["PF"] / 1000
+            payload["meter_hz"] = power_mon_json["Hz"] / 10
+
+        write_api.write(
+            bucket=bucket,
+            org="fern",
+            record=[
+                {
+                    "measurement": "power",
+                    "time": datetime.datetime.utcnow().isoformat()[:-7] + "Z",
+                    "fields": payload,
+                },
+            ],
+        )
     except ValueError as e:
-        print e
-        meter.flushInput()
-        meter.flushOutput()            
+        print(e)
     finally:
         pass
 
-log_to_influx(meter, db_client)
+
+log_to_influx(db_client)

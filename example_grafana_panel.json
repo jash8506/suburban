@@ -1,0 +1,119 @@
+{
+  "id": 3,
+  "type": "timeseries",
+  "title": "Volts & Amps",
+  "gridPos": {
+    "x": 12,
+    "y": 14,
+    "h": 8,
+    "w": 12
+  },
+  "fieldConfig": {
+    "defaults": {
+      "custom": {
+        "drawStyle": "line",
+        "lineInterpolation": "linear",
+        "barAlignment": 0,
+        "barWidthFactor": 0.6,
+        "lineWidth": 1,
+        "fillOpacity": 0,
+        "gradientMode": "none",
+        "spanNulls": false,
+        "insertNulls": false,
+        "showPoints": "auto",
+        "pointSize": 5,
+        "stacking": {
+          "mode": "none",
+          "group": "A"
+        },
+        "axisPlacement": "auto",
+        "axisLabel": "",
+        "axisColorMode": "text",
+        "axisBorderShow": false,
+        "scaleDistribution": {
+          "type": "linear"
+        },
+        "axisCenteredZero": false,
+        "hideFrom": {
+          "tooltip": false,
+          "viz": false,
+          "legend": false
+        },
+        "thresholdsStyle": {
+          "mode": "off"
+        }
+      },
+      "color": {
+        "mode": "palette-classic"
+      },
+      "mappings": [],
+      "thresholds": {
+        "mode": "absolute",
+        "steps": [
+          {
+            "color": "green",
+            "value": null
+          },
+          {
+            "color": "red",
+            "value": 80
+          }
+        ]
+      },
+      "unit": "volt"
+    },
+    "overrides": [
+      {
+        "matcher": {
+          "id": "byFrameRefID",
+          "options": "B"
+        },
+        "properties": [
+          {
+            "id": "custom.axisPlacement",
+            "value": "right"
+          },
+          {
+            "id": "unit",
+            "value": "amp"
+          }
+        ]
+      }
+    ]
+  },
+  "pluginVersion": "11.3.0",
+  "targets": [
+    {
+      "query": "from(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"power\" and r[\"_field\"] == \"meter_volts\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean)",
+      "refId": "A"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "be3hsmq38ejuoe"
+      },
+      "hide": false,
+      "query": "from(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"power\" and r[\"_field\"] == \"meter_amps\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean)",
+      "refId": "B"
+    }
+  ],
+  "datasource": {
+    "type": "influxdb",
+    "uid": "be3hsmq38ejuoe"
+  },
+  "options": {
+    "tooltip": {
+      "mode": "single",
+      "sort": "none"
+    },
+    "legend": {
+      "showLegend": true,
+      "displayMode": "list",
+      "placement": "bottom",
+      "calcs": []
+    },
+    "timezone": [
+      ""
+    ]
+  }
+}

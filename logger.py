@@ -12,14 +12,20 @@ import grequests
 # from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 
-token = os.environ.get("INFLUXDB_TOKEN")
 org = "fern"
-db_client = influxdb_client.InfluxDBClient(
-    url="http://localhost:8086", token=token, org=org
-)
 bucket = "home"
-write_api = db_client.write_api(write_options=SYNCHRONOUS)
-
+connected = False
+while not connected:
+    try:
+        token = os.environ.get("INFLUXDB_TOKEN")
+        db_client = influxdb_client.InfluxDBClient(
+            url="http://localhost:8086", token=token, org=org
+        )
+        write_api = db_client.write_api(write_options=SYNCHRONOUS)
+        connected = True
+    except:
+        time.sleep(1)
+        pass
 
 EMPTY_ENTRY = {
     "inverter_power": None,
@@ -103,7 +109,7 @@ def log_to_influx():
             record=[
                 {
                     "measurement": "power",
-                    "time": datetime.datetime.utcnow().isoformat()[:-7] + "Z",
+                    "time": datetime.datetime.utcnow().isoformat()[:-3] + "Z",
                     "fields": payload,
                 },
             ],

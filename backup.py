@@ -11,7 +11,7 @@ db_client = influxdb_client.InfluxDBClient(
 
 query_api = db_client.query_api()
 
-start = pd.Timestamp('2024-11-13', tz="UTC")
+start = pd.Timestamp('2024-12-10', tz="UTC")
 # move forward 11 hours to match Sydney daylight saving time
 start = start + pd.Timedelta('11h')
 
@@ -22,6 +22,6 @@ while start < datetime.datetime.now(tz=datetime.timezone.utc):
 |> filter(fn:(r) => r._measurement == "power")\
 |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")'
     df = query_api.query_data_frame(query)
-    df.to_parquet(f'power_{start.strftime("%Y-%m-%d")}.parquet')
+    df.to_parquet(f'log/power_{start.strftime("%Y-%m-%d")}.parquet')
     start = start + pd.Timedelta('1d')
     time.sleep(10)

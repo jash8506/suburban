@@ -12,7 +12,7 @@ db_client = influxdb_client.InfluxDBClient(
 
 query_api = db_client.query_api()
 
-start = pd.Timestamp('2024-12-10', tz="UTC")
+start = pd.Timestamp('2024-12-12', tz="UTC")
 # move forward 11 hours to match Sydney daylight saving time
 start = start + pd.Timedelta('11h')
 

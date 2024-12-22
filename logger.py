@@ -6,11 +6,35 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import influxdb_client
+from influxdb_client.client.write_api import SYNCHRONOUS
 import requests
 import grequests
+import logger
+from dbfilter import DeadbandFilter
 
-# from influxdb_client import InfluxDBClient, Point, WritePrecision
-from influxdb_client.client.write_api import SYNCHRONOUS
+EMPTY_ENTRY = {
+    "inverter_power": None,
+    # negative is export
+    "meter_power": None,
+    "meter_volts": None,
+    "meter_amps": None,
+    "meter_va": None,
+    "meter_var": None,
+    "meter_w_dmd": None,
+    "meter_w_dmd_peak": None,
+    "meter_pf": None,
+    "meter_hz": None,
+    "load_power": None
+}
+
+
+dbf_settings = {"inverter_power": 50, "meter_power": 50}
+dbf_keys = [k for k in dbf_settings] + ['time']
+deadbandFilter = DeadbandFilter(dbf_settings, 15000, debug=False)
+last_point = {}
+log_file_name = 'Fern'
+log_columns = ['time'].concat(EMPTY_ENTRY.keys())
+log_handler = logger.CSV_Handler(logging.getLogger(log_file_name), ','.join(log_columns), os.path.join('./log', log_file_name), when='midnight', interval=1, backupCount=0, encoding=None, utc=True)
 
 org = "fern"
 bucket = "home"
@@ -27,20 +51,6 @@ while not connected:
         time.sleep(1)
         pass
 
-EMPTY_ENTRY = {
-    "inverter_power": None,
-    # negative is export
-    "meter_power": None,
-    "meter_volts": None,
-    "meter_amps": None,
-    "meter_va": None,
-    "meter_var": None,
-    "meter_w_dmd": None,
-    "meter_w_dmd_peak": None,
-    "meter_pf": None,
-    "meter_hz": None,
-    "load_power": None
-}
 
 
 def get_dummy_entry():
@@ -86,6 +96,7 @@ def log_to_influx():
         #        ],
         #    )
         payload = EMPTY_ENTRY.copy()
+        payload['time'] = datetime.datetime.now().timestamp()
         if inverter_json:
             payload["inverter_power"] = inverter_json["Body"]["Data"]["PAC"]["Values"][
                 "1"
@@ -103,41 +114,43 @@ def log_to_influx():
             payload["meter_hz"] = power_mon_json["Hz"] / 10
             if payload["inverter_power"] != None:
                 payload["load_power"] = payload["inverter_power"] + payload["meter_power"]
-        write_api.write(
-            bucket=bucket,
-            org="fern",
-            record=[
-                {
-                    "measurement": "power",
-                    "time": datetime.datetime.utcnow().isoformat()[:-3] + "Z",
-                    "fields": payload,
-                },
-            ],
-        )
+
+
+        save_point = deadbandFilter.filter({k:payload[k] for k in dbf_settings.keys()})
+        if save_point:
+            #filter call returns previously passed in data. Now other values that were not considered by the filter are added
+            k_list = [k for k in last_point.keys() if k not in dbf_keys]
+            for k in k_list:
+                save_point[k]=self.last_point[k]
+            # write to log file
+            log_line = ','.join(['{:.{prec}f}'.format(save_point[k], prec=precision) for k, precision in log_columns])
+            log_handler.logger.info(log_line)
+            time = save_point.pop('time')
+            # write to influxdb
+            write_api.write(
+                bucket=bucket,
+                org="fern",
+                record=[
+                    {
+                        "measurement": "power",
+                        "time": time,
+                        "fields": save_point,
+                    },
+                ],
+            )
+        last_point = payload
     except Exception as e: 
         print('issue!!')
         print(e)
     finally:
         pass
-        #scheduling was killing itself racing the ThreadPoolExecutor
-        #time_now = datetime.datetime.now()
-        #global last_read
-        #time_delta = time_now - last_read
-        #seconds = time_delta.seconds+time_delta.microseconds/999999
-        #print('sleep for ', 0.0-seconds, ' ', datetime.datetime.now().time())
-        #if seconds < 0.0:
-        #    time.sleep(0.0-seconds)
-        #print(datetime.datetime.now().time() )
-        #last_read = time_now
 
 
 while True:
     #scheduling was killing itself racing the ThreadPoolExecutor, so something more basic
-    
     start = datetime.datetime.now()
     log_to_influx()
     end = datetime.datetime.now()
-    
     time_delta = end - start 
     seconds_float = time_delta.seconds+time_delta.microseconds/999999
     print('sleep for ', 0.5 - seconds_float)

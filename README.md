@@ -28,9 +28,24 @@ Rather than pay Fronius a monthly fee to monitor my usage, I'm doing it myself. 
   - Cloudflare reverse proxy to connect from anywhere.
   
 # notes
+
+1. Create `run.sh` file. Contents:
+```
+export INFLUXDB_TOKEN=<influxdb token>
+python logger.py
+```
+2. Start script as root when rebooting:
+```
+echo "" > /var/spool/cron/crontabs/root
+line="@reboot supervise /home/john/Desktop/suburban/run.sh &"
+(crontab -u root -l; echo "$line" ) | crontab -u root -
+```
+
 ### grafana dashboards
 example_grafana_dashboard.json shows how to set up a dashboard with 2 y axes and aggregate function on query.
 ### restart python script on reboot
 `crontab -e`
 then append
-`@reboot /home/john/Desktop/suburban/start.sh`
+`@reboot supervise /home/john/Desktop/suburban/run.sh &`
+
+

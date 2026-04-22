@@ -49,3 +49,6 @@ then append
 `@reboot supervise /home/john/Desktop/suburban/run.sh &`
 
 
+#Misc
+For some reason, I needed to run this to allow the linux nuc to see the battery interface.
+`sudo ip neigh replace 192.168.0.137 lladdr 94:51:dc:20:87:04 dev wlp58s0`

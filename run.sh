@@ -1,0 +1,2 @@
+export INFLUXDB_TOKEN=6lJlki1d3xkWceP_101vKecJ1o329QSpYerL7PrFRT2U8uLTnsFUgeNUjirtsbgP1yhQd4RhnWmv-Sk4r81zxg==
+/opt/anaconda3/bin/python logger.py

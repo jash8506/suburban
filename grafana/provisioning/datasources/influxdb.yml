@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    uid: influxdb-fern
+    access: proxy
+    url: http://influxdb:8086
+    isDefault: true
+    jsonData:
+      version: Flux
+      organization: fern
+      defaultBucket: home
+      tlsSkipVerify: true
+    secureJsonData:
+      token: dev-token-fern-local

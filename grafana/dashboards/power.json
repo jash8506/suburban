@@ -1,0 +1,198 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Inverter Power — raw vs filtered",
+      "description": "raw is every poll (requires logger --raw). filtered is what the deadband decided to keep.",
+      "gridPos": { "x": 0, "y": 0, "h": 9, "w": 12 },
+      "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": true
+          },
+          "color": { "mode": "palette-classic" },
+          "unit": "watt"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "filtered" },
+            "properties": [
+              { "id": "custom.lineInterpolation", "value": "stepAfter" },
+              { "id": "custom.lineWidth", "value": 2 },
+              { "id": "custom.pointSize", "value": 6 },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } },
+              { "id": "displayName", "value": "filtered" }
+            ]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "raw" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } },
+              { "id": "displayName", "value": "raw" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "raw",
+          "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
+          "query": "from(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"power_raw\" and r[\"_field\"] == \"inverter_power\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean)"
+        },
+        {
+          "refId": "filtered",
+          "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
+          "query": "from(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"power\" and r[\"_field\"] == \"inverter_power\")"
+        }
+      ],
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "none" },
+        "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": [] }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Meter Power — raw vs filtered",
+      "description": "raw is every poll (requires logger --raw). filtered is what the deadband decided to keep.",
+      "gridPos": { "x": 12, "y": 0, "h": 9, "w": 12 },
+      "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": true
+          },
+          "color": { "mode": "palette-classic" },
+          "unit": "watt"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "filtered" },
+            "properties": [
+              { "id": "custom.lineInterpolation", "value": "stepAfter" },
+              { "id": "custom.lineWidth", "value": 2 },
+              { "id": "custom.pointSize", "value": 6 },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } },
+              { "id": "displayName", "value": "filtered" }
+            ]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "raw" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } },
+              { "id": "displayName", "value": "raw" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "raw",
+          "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
+          "query": "from(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"power_raw\" and r[\"_field\"] == \"meter_power\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean)"
+        },
+        {
+          "refId": "filtered",
+          "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
+          "query": "from(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"power\" and r[\"_field\"] == \"meter_power\")"
+        }
+      ],
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "none" },
+        "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": [] }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Volts & Amps",
+      "gridPos": { "x": 0, "y": 9, "h": 8, "w": 24 },
+      "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": true
+          },
+          "color": { "mode": "palette-classic" },
+          "unit": "volt"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "unit", "value": "amp" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
+          "query": "from(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => (r[\"_measurement\"] == \"power\" or r[\"_measurement\"] == \"power_raw\") and r[\"_field\"] == \"meter_volts\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
+          "query": "from(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => (r[\"_measurement\"] == \"power\" or r[\"_measurement\"] == \"power_raw\") and r[\"_field\"] == \"meter_amps\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean)"
+        }
+      ],
+      "options": {
+        "tooltip": { "mode": "single", "sort": "none" },
+        "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": [] }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": [],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Power",
+  "uid": "power",
+  "version": 2,
+  "weekStart": ""
+}

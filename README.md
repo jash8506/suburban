@@ -74,7 +74,7 @@ sudo systemctl restart suburban-logger # restart after code changes
 
 ### daily log backup to GitHub
 
-`backup.sh` stages everything under `log/`, commits, and pushes so the parquet files are mirrored to the remote. `suburban-backup.timer` fires it once a day.
+`backup.sh` stages everything under `log/`, commits, and pushes so the parquet/csv files are mirrored to the remote. `suburban-backup.timer` fires it once a day.
 
 1. Make sure `git push` works non-interactively for the `john` user on the NUC. Either switch the remote to SSH (`git remote set-url origin git@github.com:jash8506/suburban.git` with a keypair in `~/.ssh`) or configure a credential helper storing a personal access token (`git config --global credential.helper store` then push once by hand).
 

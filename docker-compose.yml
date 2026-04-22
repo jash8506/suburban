@@ -1,28 +1,31 @@
-version: "3.8"
-
 services:
   influxdb:
-    image: influxdb:latest
+    image: influxdb:2.7
     ports:
       - "8086:8086"
     volumes:
-      - influxdb_data:/var/lib/influxdb
-    # environment:
-    # INFLUXDB_DB: mydb
-    # INFLUXDB_ADMIN_USER: admin
-    # INFLUXDB_ADMIN_PASSWORD: admin_password
+      - influxdb_data:/var/lib/influxdb2
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: devpassword
+      DOCKER_INFLUXDB_INIT_ORG: fern
+      DOCKER_INFLUXDB_INIT_BUCKET: home
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: dev-token-fern-local
     networks:
       - monitoring
 
   grafana:
     image: grafana/grafana:latest
     ports:
-      - "3000:3000"
+      - "3005:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-    # environment:
-    # GF_SECURITY_ADMIN_USER: admin
-    # GF_SECURITY_ADMIN_PASSWORD: admin_password
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
     networks:
       - monitoring
     depends_on:

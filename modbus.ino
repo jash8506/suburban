@@ -51,15 +51,19 @@ bool is_signed[REG_COUNT] = { false, true, true, false, true, false, false };
 #define DEBUG_MODE false
 
 void setup() {
-  Serial.begin(9600);
-  while (!Serial)
-    ;
+  if (DEBUG_MODE) {
+    Serial.begin(9600);
+    // while (!Serial)
+    //   ;
+    Serial.println("Modbus RTU Client");
+  }
   // Modbus setup
-  Serial.println("Modbus RTU Client");
   RS485.setDelays(preDelayBR, postDelayBR);
   // Start the Modbus RTU client
   if (!ModbusRTUClient.begin(baudrate)) {
-    Serial.println("Failed to start Modbus RTU Client!");
+    if (DEBUG_MODE) {
+      Serial.println("Failed to start Modbus RTU Client!");
+    }
     while (1)
       ;
   }
@@ -72,18 +76,25 @@ void setup() {
 
   // Start to listen
   server.begin();
-  Serial.println(("Server is ready."));
-  Serial.print("Please connect to http://");
-  Serial.println(Ethernet.localIP());
+  if (DEBUG_MODE) {
+    Serial.println(("Server is ready."));
+    Serial.print("Please connect to http://");
+    Serial.println(Ethernet.localIP());
+  }
+  Serial.end();
 }
 
 void loop() {
+  Ethernet.maintain();
+  if (!server) {
+    server.begin();
+  }
   // Modbus poll. REG_COUNT 32 bit registers, then 2 (16 bit) more for PF/Hz
   int registers_to_read = (REG_COUNT * 2) + 2;
 
   if (!ModbusRTUClient.requestFrom(1, INPUT_REGISTERS, 0x00, registers_to_read)) {
-    Serial.print("failed to read registers! ");
-    Serial.println(ModbusRTUClient.lastError());
+    // Serial.print("failed to read registers! ");
+    // Serial.println(ModbusRTUClient.lastError());
   } else {
     for (int ix = 0; ix < REG_COUNT; ix++) {
       // power monitor values are all 32 bit
@@ -120,7 +131,7 @@ void loop() {
     response["Hz"] = hz;
   }
 
-  // Wait for an incomming connection
+  // Wait for an incoming connection
   EthernetClient client = server.available();
 
   if (client) {
@@ -136,6 +147,8 @@ void loop() {
     sendPower(&client);
     return;
     client.stop();
+  } else {
+    // Serial.println('faaail');
   }
 }
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily backup of suburban logs
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

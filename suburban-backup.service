@@ -1,0 +1,10 @@
+[Unit]
+Description=Commit and push suburban logs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=john
+WorkingDirectory=/home/john/Desktop/suburban
+ExecStart=/home/john/Desktop/suburban/backup.sh

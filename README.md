@@ -95,72 +95,26 @@ sudo systemctl restart suburban-logger # restart after code changes
 
 ### daily log backup to GitHub
 
-Stages everything under `log/`, commits, and pushes once a day so the parquet files are backed up to the remote.
+`backup.sh` stages everything under `log/`, commits, and pushes so the parquet files are mirrored to the remote. `suburban-backup.timer` fires it once a day.
 
 1. Make sure `git push` works non-interactively for the `john` user on the NUC. Either switch the remote to SSH (`git remote set-url origin git@github.com:jash8506/suburban.git` with a keypair in `~/.ssh`) or configure a credential helper storing a personal access token (`git config --global credential.helper store` then push once by hand).
 
-2. Create `backup.sh` in the repo root:
-
-```sh
-#!/bin/sh
-set -eu
-cd /home/john/Desktop/suburban
-git add log/
-if git diff --cached --quiet; then
-    echo "nothing to back up"
-    exit 0
-fi
-git commit -m "log backup $(date -Iseconds)"
-git push
-```
-
-Make it executable: `chmod +x backup.sh`.
-
-3. Create `/etc/systemd/system/suburban-backup.service`:
+2. Install the unit files (they live in the repo root):
 
 ```
-[Unit]
-Description=Commit and push suburban logs
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-User=john
-WorkingDirectory=/home/john/Desktop/suburban
-ExecStart=/home/john/Desktop/suburban/backup.sh
-```
-
-4. Create `/etc/systemd/system/suburban-backup.timer`:
-
-```
-[Unit]
-Description=Daily backup of suburban logs
-
-[Timer]
-OnCalendar=daily
-Persistent=true
-RandomizedDelaySec=30min
-
-[Install]
-WantedBy=timers.target
-```
-
-`Persistent=true` runs a missed backup after boot if the NUC was off at the scheduled time. `RandomizedDelaySec` jitters the fire time so it isn't exactly at midnight.
-
-5. Enable the timer (not the service — the timer triggers it):
-
-```
+sudo cp suburban-backup.service suburban-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now suburban-backup.timer
 ```
 
+Enable the timer, not the service — the timer triggers it. `Persistent=true` in the timer catches up a missed backup after boot; `RandomizedDelaySec` jitters the fire time off midnight.
+
 Useful commands:
 
 ```
-systemctl list-timers suburban-backup*     # next/last run
-systemctl status suburban-backup.service   # last run result
-journalctl -u suburban-backup.service      # output of past runs
+systemctl list-timers suburban-backup*        # next/last run
+systemctl status suburban-backup.service      # last run result
+journalctl -u suburban-backup.service         # output of past runs
 sudo systemctl start suburban-backup.service  # run now, out of schedule
 ```
 

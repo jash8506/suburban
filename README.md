@@ -56,31 +56,10 @@ example_grafana_dashboard.json shows how to set up a dashboard with 2 y axes and
 
 ### run logger as a systemd service
 
-`@reboot` in crontab isn't reliable (no restart on crash, fires before the network is up). Use systemd instead.
-
-Create `/etc/systemd/system/suburban-logger.service`:
+`@reboot` in crontab isn't reliable (no restart on crash, fires before the network is up). Use systemd instead. `suburban-logger.service` lives in the repo root; install it with:
 
 ```
-[Unit]
-Description=Suburban home energy logger
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=john
-WorkingDirectory=/home/john/Desktop/suburban
-ExecStart=/home/john/Desktop/suburban/run.sh
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then enable and start:
-
-```
+sudo cp suburban-logger.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now suburban-logger.service
 ```

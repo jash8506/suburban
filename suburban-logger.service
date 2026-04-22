@@ -1,0 +1,15 @@
+[Unit]
+Description=Suburban home energy logger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=john
+WorkingDirectory=/home/john/Desktop/suburban
+ExecStart=/home/john/Desktop/suburban/run.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

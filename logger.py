@@ -29,6 +29,7 @@ EMPTY_ENTRY = {
     "meter_pf": None,
     "meter_hz": None,
     "battery_power": None,
+    "battery_inverter_temp": None,
     "load_power": None,
 }
 
@@ -58,6 +59,7 @@ log_columns = [
     ("meter_pf", 3),
     ("meter_hz", 2),
     ("battery_power", 2),
+    ("battery_inverter_temp", 1),
     ("load_power", 2),
 ]
 log_file_name = "Fern"
@@ -199,11 +201,16 @@ def fetch_battery():
         timeout=4,
     )
     resp.raise_for_status()
-    pac = resp.json().get("pac")
+    j = resp.json()
+    pac = j.get("pac")
     if pac is None:
         return None
     # float so the Influx field stays float-typed across interpolated values
-    return {"battery_power": float(pac)}
+    out = {"battery_power": float(pac)}
+    tmp = j.get("tmp")
+    if tmp is not None:
+        out["battery_inverter_temp"] = tmp / 10.0
+    return out
 
 
 pollers = [

@@ -29,6 +29,7 @@ EMPTY_ENTRY = {
     "meter_pf": None,
     "meter_hz": None,
     "battery_power": None,
+    "battery_inverter_temp": None,
     "load_power": None,
 }
 
@@ -40,8 +41,8 @@ in_outage = False
 
 # Sample behind wall clock so every device poller has had time to put bracketing
 # readings on either side of the query time. Must be larger than the slowest
-# device's natural poll interval (battery ~2.5 s).
-QUERY_LAG_S = 10
+# device's natural poll interval (battery ~5 s).
+QUERY_LAG_S = 15
 LOOP_HZ = 3
 
 # (column, float precision) — used for CSV formatting and header
@@ -58,6 +59,7 @@ log_columns = [
     ("meter_pf", 3),
     ("meter_hz", 2),
     ("battery_power", 2),
+    ("battery_inverter_temp", 1),
     ("load_power", 2),
 ]
 log_file_name = "Fern"
@@ -199,22 +201,68 @@ def fetch_battery():
         timeout=4,
     )
     resp.raise_for_status()
-    pac = resp.json().get("pac")
+    j = resp.json()
+    pac = j.get("pac")
     if pac is None:
         return None
     # float so the Influx field stays float-typed across interpolated values
-    return {"battery_power": float(pac)}
+    out = {"battery_power": float(pac)}
+    tmp = j.get("tmp")
+    if tmp is not None:
+        out["battery_inverter_temp"] = tmp / 10.0
+    return out
 
 
 pollers = [
     DevicePoller("power_mon", fetch_power_mon),
     DevicePoller("inverter", fetch_inverter),
-    # battery's natural fetch time is ~2.5 s so min_interval has no effect;
-    # widen max_gap to tolerate a single missed poll without wiping history.
-    DevicePoller("battery", fetch_battery, max_gap_s=60),
+    # Solplanet wifi dongle drops out intermittently under load; poll every ~5 s
+    # (well above its ~2.5 s natural fetch time) to reduce pressure on it.
+    DevicePoller("battery", fetch_battery, min_interval=5, max_gap_s=60),
 ]
 for p in pollers:
     p.start()
+
+
+def fetch_soc():
+    resp = requests.get(
+        "https://192.168.0.137/getdevdata.cgi?device=4&sn=PB50005S125C0610",
+        verify=False,
+        timeout=4,
+    )
+    resp.raise_for_status()
+    soc = resp.json().get("soc")
+    return None if soc is None else float(soc)
+
+
+# SOC changes slowly and lives on a different endpoint; poll on its own 60 s
+# cadence and write straight to Influx rather than interpolating through the
+# main sample loop (which would require a QUERY_LAG_S > 60 s).
+def soc_loop():
+    while True:
+        started = time.monotonic()
+        try:
+            soc = fetch_soc()
+            if soc is not None:
+                write_api.write(
+                    bucket=bucket,
+                    org="fern",
+                    record=[
+                        {
+                            "measurement": "power",
+                            "time": datetime.datetime.now(tz=datetime.timezone.utc),
+                            "fields": {"battery_soc": soc},
+                        },
+                    ],
+                )
+        except Exception as e:
+            print("soc poll failed:", e)
+        elapsed = time.monotonic() - started
+        if elapsed < 60:
+            time.sleep(60 - elapsed)
+
+
+threading.Thread(target=soc_loop, daemon=True, name="poller-soc").start()
 
 
 def _fill_load_power(payload):

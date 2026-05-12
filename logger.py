@@ -197,19 +197,35 @@ def fetch_inverter():
 # The Solplanet wifi dongle falls over if hit with overlapping or rapid-fire
 # requests, so every call to 192.168.0.137 funnels through this gate — it
 # serializes requests and enforces at least 5 s between request *starts*.
+# A single Session is reused so we keep one keep-alive TCP+TLS connection open
+# instead of churning the dongle's tiny connection table on every poll.
 _solplanet_lock = threading.Lock()
 _solplanet_last_request = 0.0
 _SOLPLANET_MIN_GAP_S = 5.0
+_solplanet_session = requests.Session()
+_solplanet_session.verify = False
 
 
 def solplanet_get(url):
-    global _solplanet_last_request
+    global _solplanet_last_request, _solplanet_session
     with _solplanet_lock:
         wait = _SOLPLANET_MIN_GAP_S - (time.monotonic() - _solplanet_last_request)
         if wait > 0:
             time.sleep(wait)
         _solplanet_last_request = time.monotonic()
-        return requests.get(url, verify=False, timeout=20)
+        try:
+            return _solplanet_session.get(url, timeout=20)
+        except requests.RequestException:
+            # On any transport-level failure, throw away the session so the next
+            # call rebuilds the TCP+TLS connection from scratch rather than
+            # retrying through a wedged socket.
+            try:
+                _solplanet_session.close()
+            except Exception:
+                pass
+            _solplanet_session = requests.Session()
+            _solplanet_session.verify = False
+            raise
 
 
 def fetch_battery():

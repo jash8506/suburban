@@ -122,20 +122,46 @@ class DevicePoller(threading.Thread):
         self._max_gap_s = max_gap_s
 
     def run(self):
+        ok = fail = empty = 0
+        slowest = 0.0
+        last_heartbeat = time.monotonic()
         while True:
             started = time.monotonic()
             data = None
+            failed = False
             try:
                 data = self._fetch()
             except Exception as e:
-                print(f"{self.name} poll failed:", e)
+                failed = True
+                fail += 1
+                print(f"[{self.name}] poll failed after {time.monotonic()-started:.2f}s: {e}")
+            slowest = max(slowest, time.monotonic() - started)
             if data:
+                ok += 1
                 ts = datetime.datetime.now().timestamp()
                 with self._lock:
                     if self._history and ts - self._history[-1][0] > self._max_gap_s:
-                        # Gap too large — don't let value_at bridge across the outage
+                        gap = ts - self._history[-1][0]
+                        print(f"[{self.name}] gap {gap:.1f}s > max {self._max_gap_s}s — clearing history")
                         self._history.clear()
                     self._history.append((ts, data))
+            elif not failed:
+                empty += 1
+            now = time.monotonic()
+            if now - last_heartbeat >= 60:
+                with self._lock:
+                    hist_len = len(self._history)
+                    last_age = (
+                        datetime.datetime.now().timestamp() - self._history[-1][0]
+                    ) if self._history else None
+                age_str = f"{last_age:.1f}s ago" if last_age is not None else "never"
+                print(
+                    f"[{self.name}] heartbeat: ok={ok} fail={fail} empty={empty} "
+                    f"slowest={slowest:.2f}s hist={hist_len} last_reading={age_str}"
+                )
+                ok = fail = empty = 0
+                slowest = 0.0
+                last_heartbeat = now
             elapsed = time.monotonic() - started
             if elapsed < self._min_interval:
                 time.sleep(self._min_interval - elapsed)
@@ -208,14 +234,22 @@ _solplanet_session.verify = False
 
 def solplanet_get(url):
     global _solplanet_last_request, _solplanet_session
+    device = url.split("device=", 1)[-1].split("&", 1)[0] if "device=" in url else "?"
     with _solplanet_lock:
         wait = _SOLPLANET_MIN_GAP_S - (time.monotonic() - _solplanet_last_request)
         if wait > 0:
             time.sleep(wait)
         _solplanet_last_request = time.monotonic()
+        started = time.monotonic()
         try:
-            return _solplanet_session.get(url, timeout=20)
-        except requests.RequestException:
+            resp = _solplanet_session.get(url, timeout=20)
+            elapsed = time.monotonic() - started
+            if elapsed > 3.0 or resp.status_code != 200:
+                print(f"[solplanet] device={device} {resp.status_code} in {elapsed:.2f}s")
+            return resp
+        except requests.RequestException as e:
+            elapsed = time.monotonic() - started
+            print(f"[solplanet] device={device} FAILED after {elapsed:.2f}s: {e}")
             # On any transport-level failure, throw away the session so the next
             # call rebuilds the TCP+TLS connection from scratch rather than
             # retrying through a wedged socket.
@@ -285,8 +319,11 @@ def soc_loop():
                         },
                     ],
                 )
+                print(f"[soc] {soc:.0f}%")
+            else:
+                print("[soc] no soc field in response")
         except Exception as e:
-            print("soc poll failed:", e)
+            print(f"[soc] poll failed: {e}")
         elapsed = time.monotonic() - started
         if elapsed < 60:
             time.sleep(60 - elapsed)
@@ -401,14 +438,30 @@ def sample_once():
 
 
 loop_period = 1.0 / LOOP_HZ
+loop_iters = 0
+loop_errors = 0
+loop_overruns = 0
+last_loop_heartbeat = time.monotonic()
+print(f"[main] starting sample loop at {LOOP_HZ} Hz, QUERY_LAG_S={QUERY_LAG_S}s")
 while True:
     started = time.monotonic()
     try:
         sample_once()
     except Exception as e:
-        print("issue!!", e)
+        loop_errors += 1
+        print(f"[main] sample_once error: {e}")
     elapsed = time.monotonic() - started
+    loop_iters += 1
+    if elapsed > loop_period * 1.5:
+        loop_overruns += 1
+        print(f"[main] loop overrun: {elapsed:.3f}s")
+    now = time.monotonic()
+    if now - last_loop_heartbeat >= 60:
+        print(
+            f"[main] heartbeat: iters={loop_iters} errors={loop_errors} "
+            f"overruns={loop_overruns} in_outage={in_outage}"
+        )
+        loop_iters = loop_errors = loop_overruns = 0
+        last_loop_heartbeat = now
     if elapsed < loop_period:
         time.sleep(loop_period - elapsed)
-    elif elapsed > loop_period * 1.5:
-        print(f"loop overrun: {elapsed:.3f}s")

@@ -194,11 +194,27 @@ def fetch_inverter():
     return {"inverter_power": resp.json()["Body"]["Data"]["PAC"]["Values"]["1"]}
 
 
+# The Solplanet wifi dongle falls over if hit with overlapping or rapid-fire
+# requests, so every call to 192.168.0.137 funnels through this gate — it
+# serializes requests and enforces at least 5 s between request *starts*.
+_solplanet_lock = threading.Lock()
+_solplanet_last_request = 0.0
+_SOLPLANET_MIN_GAP_S = 5.0
+
+
+def solplanet_get(url):
+    global _solplanet_last_request
+    with _solplanet_lock:
+        wait = _SOLPLANET_MIN_GAP_S - (time.monotonic() - _solplanet_last_request)
+        if wait > 0:
+            time.sleep(wait)
+        _solplanet_last_request = time.monotonic()
+        return requests.get(url, verify=False, timeout=4)
+
+
 def fetch_battery():
-    resp = requests.get(
-        "https://192.168.0.137/getdevdata.cgi?device=2&sn=PB50005S125C0610",
-        verify=False,
-        timeout=4,
+    resp = solplanet_get(
+        "https://192.168.0.137/getdevdata.cgi?device=2&sn=PB50005S125C0610"
     )
     resp.raise_for_status()
     j = resp.json()
@@ -225,10 +241,8 @@ for p in pollers:
 
 
 def fetch_soc():
-    resp = requests.get(
-        "https://192.168.0.137/getdevdata.cgi?device=4&sn=PB50005S125C0610",
-        verify=False,
-        timeout=4,
+    resp = solplanet_get(
+        "https://192.168.0.137/getdevdata.cgi?device=4&sn=PB50005S125C0610"
     )
     resp.raise_for_status()
     soc = resp.json().get("soc")

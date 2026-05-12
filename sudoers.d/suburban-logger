@@ -1,0 +1,4 @@
+# Allow the suburban-logger service (running as user john) to ARP-probe the
+# Solplanet dongle without a password prompt. arping needs root for raw
+# sockets; see logger.py:_wake_solplanet for why we do this at all.
+john ALL=(root) NOPASSWD: /usr/bin/arping, /usr/sbin/arping

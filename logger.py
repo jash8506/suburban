@@ -234,7 +234,7 @@ _solplanet_session.verify = False
 
 
 def _wake_solplanet():
-    """Best-effort: ICMP-ping the dongle to refresh stale AP bridge FDB / ARP
+    """Best-effort: ARP-probe the dongle to refresh stale AP bridge FDB / ARP
     state. The dongle has been observed unreachable after long idle gaps even
     though it answers fine once any traffic gets through to wake the path.
 
@@ -243,17 +243,21 @@ def _wake_solplanet():
     router's bridging FDB seems to age out / lose the dongle's MAC after idle
     periods. Any traffic in either direction re-populates the table and the
     path comes back. This is a workaround for that router — not something we
-    can fix in software."""
+    can fix in software.
+
+    arping (vs. ICMP ping) targets the bridge FDB at L2 directly, which is the
+    layer that's actually aging out — and works even when the IP path is
+    wedged. Needs sudo + an explicit interface."""
     try:
         result = subprocess.run(
-            ["ping", "-c", "2", "-W", "2", "192.168.0.137"],
+            ["sudo", "arping", "-c", "2", "-w", "3", "-I", "wlp58s0", "192.168.0.137"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=6,
         )
-        print(f"[solplanet] wake ping rc={result.returncode}")
+        print(f"[solplanet] wake arping rc={result.returncode}")
     except Exception as e:
-        print(f"[solplanet] wake ping failed: {e}")
+        print(f"[solplanet] wake arping failed: {e}")
 
 
 def solplanet_get(url):
@@ -283,7 +287,7 @@ def solplanet_get(url):
                 pass
             _solplanet_session = requests.Session()
             _solplanet_session.verify = False
-            # Wake the path before the next HTTPS attempt — small ICMP traffic
+            # Wake the path before the next HTTPS attempt — an ARP probe
             # repopulates the AP's bridge FDB / dongle's ARP cache when they've
             # aged out, which is what was causing the multi-day dropouts.
             _wake_solplanet()

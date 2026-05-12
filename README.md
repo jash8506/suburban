@@ -102,3 +102,34 @@ sudo systemctl start suburban-backup.service  # run now, out of schedule
 For some reason, I needed to run this to allow the NUC to see the battery interface.
 `sudo ip neigh replace 192.168.0.137 lladdr 94:51:dc:20:87:04 dev wlp58s0`
 OR also fixed by forcing my NUC to use the 2.4GHz band.
+
+### sudoers rule for the Solplanet wake-up ARP probe
+
+`logger.py:_wake_solplanet` runs `arping` after a failed HTTPS request to refresh the AP's bridge FDB and unstick the Solplanet dongle. `arping` needs raw sockets, so it must run as root — and the systemd service can't answer a password prompt, so we install a `NOPASSWD` sudoers drop-in.
+
+1. Confirm `arping` is installed and check its path (should match one of the entries in `sudoers.d/suburban-logger`):
+
+```
+which arping     # expect /usr/bin/arping or /usr/sbin/arping
+# install if missing
+sudo apt install iputils-arping
+```
+
+2. Install the drop-in (must be mode 0440, owned by root, or sudo refuses to load it):
+
+```
+sudo install -m 0440 -o root -g root sudoers.d/suburban-logger /etc/sudoers.d/suburban-logger
+sudo visudo -c       # validates ALL sudoers files — if this errors, remove the drop-in before logging out
+```
+
+3. Smoke test that it really is passwordless (`-n` makes sudo fail fast instead of prompting):
+
+```
+sudo -n arping -c 1 -w 1 -I wlp58s0 192.168.0.137
+```
+
+4. Restart the logger so the new wake path is live:
+
+```
+sudo systemctl restart suburban-logger
+```

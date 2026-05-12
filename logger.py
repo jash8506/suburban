@@ -2,6 +2,7 @@ import argparse
 import collections
 import datetime
 import logging
+import subprocess
 import time
 import os
 import threading
@@ -232,6 +233,29 @@ _solplanet_session = requests.Session()
 _solplanet_session.verify = False
 
 
+def _wake_solplanet():
+    """Best-effort: ICMP-ping the dongle to refresh stale AP bridge FDB / ARP
+    state. The dongle has been observed unreachable after long idle gaps even
+    though it answers fine once any traffic gets through to wake the path.
+
+    Root cause is the ISP-provided router doing 5 GHz ↔ 2.4 GHz band bridging
+    poorly: the NUC is on 5 GHz, the Solplanet dongle is 2.4 GHz only, and the
+    router's bridging FDB seems to age out / lose the dongle's MAC after idle
+    periods. Any traffic in either direction re-populates the table and the
+    path comes back. This is a workaround for that router — not something we
+    can fix in software."""
+    try:
+        result = subprocess.run(
+            ["ping", "-c", "2", "-W", "2", "192.168.0.137"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=6,
+        )
+        print(f"[solplanet] wake ping rc={result.returncode}")
+    except Exception as e:
+        print(f"[solplanet] wake ping failed: {e}")
+
+
 def solplanet_get(url):
     global _solplanet_last_request, _solplanet_session
     device = url.split("device=", 1)[-1].split("&", 1)[0] if "device=" in url else "?"
@@ -259,6 +283,10 @@ def solplanet_get(url):
                 pass
             _solplanet_session = requests.Session()
             _solplanet_session.verify = False
+            # Wake the path before the next HTTPS attempt — small ICMP traffic
+            # repopulates the AP's bridge FDB / dongle's ARP cache when they've
+            # aged out, which is what was causing the multi-day dropouts.
+            _wake_solplanet()
             raise
 
 

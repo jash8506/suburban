@@ -209,7 +209,7 @@ def solplanet_get(url):
         if wait > 0:
             time.sleep(wait)
         _solplanet_last_request = time.monotonic()
-        return requests.get(url, verify=False, timeout=4)
+        return requests.get(url, verify=False, timeout=20)
 
 
 def fetch_battery():
@@ -234,7 +234,7 @@ pollers = [
     DevicePoller("inverter", fetch_inverter),
     # Solplanet wifi dongle drops out intermittently under load; poll every ~5 s
     # (well above its ~2.5 s natural fetch time) to reduce pressure on it.
-    DevicePoller("battery", fetch_battery, min_interval=5, max_gap_s=60),
+    DevicePoller("battery", fetch_battery, min_interval=10, max_gap_s=60),
 ]
 for p in pollers:
     p.start()

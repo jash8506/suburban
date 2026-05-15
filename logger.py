@@ -229,6 +229,8 @@ def fetch_inverter():
 _solplanet_lock = threading.Lock()
 _solplanet_last_request = 0.0
 _SOLPLANET_MIN_GAP_S = 5.0
+_solplanet_last_wake = 0.0
+_SOLPLANET_WAKE_MIN_GAP_S = 10.0
 _solplanet_session = requests.Session()
 _solplanet_session.verify = False
 
@@ -248,6 +250,12 @@ def _wake_solplanet():
     arping (vs. ICMP ping) targets the bridge FDB at L2 directly, which is the
     layer that's actually aging out — and works even when the IP path is
     wedged. Needs sudo + an explicit interface."""
+    global _solplanet_last_wake
+    since = time.monotonic() - _solplanet_last_wake
+    if since < _SOLPLANET_WAKE_MIN_GAP_S:
+        print(f"[solplanet] wake arping skipped (last was {since:.1f}s ago)")
+        return
+    _solplanet_last_wake = time.monotonic()
     try:
         result = subprocess.run(
             ["sudo", "arping", "-c", "2", "-w", "3", "-I", "wlp58s0", "192.168.0.137"],

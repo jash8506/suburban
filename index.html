@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Suburban energy</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #fafafa; --card: #fff; --border: #e7e7ea; --text: #1a1a1a; --muted: #666;
+    --load: #4a6fa5; --solar: #e0a020; --import: #d97757; --export: #4a8f4a;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         max-width: 1200px; margin: 2rem auto; padding: 0 1rem; color: var(--text); background: var(--bg); }
+  h1 { margin: 0 0 0.25rem; font-size: 1.75rem; }
+  .subtitle { color: var(--muted); margin: 0 0 1.5rem; font-size: 0.9rem; }
+  .controls { display: flex; gap: 1rem; align-items: end; margin-bottom: 1.5rem; flex-wrap: wrap; }
+  .controls label { display: flex; flex-direction: column; font-size: 0.8rem; color: var(--muted); }
+  .controls input, .controls select { font-size: 0.95rem; padding: 0.35rem 0.55rem;
+         border: 1px solid #ccc; border-radius: 4px; margin-top: 0.25rem; background: var(--card); }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+         gap: 1rem; margin-bottom: 1.5rem; }
+  .kpi { background: var(--card); padding: 1rem; border-radius: 8px; border: 1px solid var(--border); }
+  .kpi .label { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .kpi .value { font-size: 1.6rem; font-weight: 600; margin-top: 0.25rem; }
+  .kpi .delta { font-size: 0.85rem; color: var(--export); margin: 0.1rem 0 0; }
+  .chart-wrap { background: var(--card); border: 1px solid var(--border);
+         border-radius: 8px; padding: 1rem 1rem 0.5rem; margin-bottom: 1.5rem; }
+  .chart-wrap h2 { font-size: 1rem; margin: 0 0 0.5rem; display: flex; justify-content: space-between; align-items: baseline; }
+  .chart-wrap h2 .status { font-size: 0.8rem; font-weight: normal; color: var(--muted); }
+  .canvas-wrap { position: relative; height: 320px; }
+  .canvas-wrap.tall { height: 420px; }
+  footer { color: var(--muted); font-size: 0.8rem; margin: 2rem 0 1rem; }
+</style>
+</head>
+<body>
+
+<h1>Suburban energy</h1>
+<p class="subtitle" id="subtitle">Loading…</p>
+
+<div class="controls">
+  <label>Start <input type="date" id="start"></label>
+  <label>End <input type="date" id="end"></label>
+  <label>Preset
+    <select id="preset">
+      <option value="30">Last 30 days</option>
+      <option value="90" selected>Last 90 days</option>
+      <option value="365">Last 365 days</option>
+      <option value="all">All time</option>
+      <option value="custom">Custom</option>
+    </select>
+  </label>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><div class="label">Load</div><div class="value" id="kpiLoad">—</div></div>
+  <div class="kpi"><div class="label">Grid imports</div><div class="value" id="kpiImport">—</div></div>
+  <div class="kpi"><div class="label">Cost without solar/battery</div><div class="value" id="kpiNoSolar">—</div></div>
+  <div class="kpi">
+    <div class="label">Actual cost</div>
+    <div class="value" id="kpiActual">—</div>
+    <p class="delta" id="kpiSavings"></p>
+  </div>
+</div>
+
+<div class="chart-wrap">
+  <h2>Daily energy (kWh)</h2>
+  <div class="canvas-wrap"><canvas id="energyChart"></canvas></div>
+</div>
+
+<div class="chart-wrap">
+  <h2>Daily cost ($)</h2>
+  <div class="canvas-wrap"><canvas id="costChart"></canvas></div>
+</div>
+
+<div class="chart-wrap">
+  <h2>Day detail <span class="status" id="dayStatus"></span></h2>
+  <div class="controls">
+    <label>Day <input type="date" id="dayPicker"></label>
+  </div>
+  <div class="canvas-wrap tall"><canvas id="dayChart"></canvas></div>
+</div>
+
+<footer id="footer"></footer>
+
+<script type="module">
+import { parquetReadObjects, asyncBufferFromUrl } from 'https://cdn.jsdelivr.net/npm/hyparquet/+esm';
+
+// ---------- formatting ----------
+
+const fmtKWh = v => v.toLocaleString(undefined, { maximumFractionDigits: 0 }) + " kWh";
+const fmtMoney = v => "$" + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const hhmm = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Australia/Sydney', hour: '2-digit', minute: '2-digit', hour12: false,
+});
+
+// ---------- Sydney timezone (rule-of-thumb, fine for non-transition days) ----------
+
+function firstSundayOf(year, month1) {
+  const d = new Date(Date.UTC(year, month1 - 1, 1));
+  return 1 + ((7 - d.getUTCDay()) % 7);
+}
+
+function isSydneyDst(year, month1, day) {
+  if (month1 < 4 || month1 > 10) return true;     // Jan–Mar, Nov–Dec
+  if (month1 > 4 && month1 < 10) return false;    // May–Sep
+  if (month1 === 4) return day < firstSundayOf(year, 4);
+  return day >= firstSundayOf(year, 10);
+}
+
+function sydneyDayStartUtc(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const offsetH = isSydneyDst(y, m, d) ? 11 : 10;
+  return Date.UTC(y, m - 1, d, 0, 0) - offsetH * 3600_000;
+}
+
+// ---------- global state ----------
+
+let DATA = null;
+let LOG_FILES = new Set();
+let energyChart = null;
+let costChart = null;
+let dayChart = null;
+let dayLoadToken = 0;
+
+// ---------- daily overview (unchanged) ----------
+
+function sliceDays(days, start, end) {
+  return days.filter(d => d.date >= start && d.date <= end);
+}
+function sum(arr, key) { return arr.reduce((a, r) => a + r[key], 0); }
+
+function renderKpis(days) {
+  document.getElementById("kpiLoad").textContent = fmtKWh(sum(days, "load_kwh"));
+  document.getElementById("kpiImport").textContent = fmtKWh(sum(days, "import_kwh"));
+  document.getElementById("kpiNoSolar").textContent = fmtMoney(sum(days, "cost_no_solar"));
+  document.getElementById("kpiActual").textContent = fmtMoney(sum(days, "cost_actual"));
+  const sv = sum(days, "savings");
+  document.getElementById("kpiSavings").textContent =
+    sv >= 0 ? `saved ${fmtMoney(sv)}` : `cost extra ${fmtMoney(-sv)}`;
+}
+
+function makeBarChart(canvasId, labels, datasets, yLabel) {
+  return new Chart(document.getElementById(canvasId), {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      scales: {
+        x: { ticks: { maxTicksLimit: 12, autoSkip: true }, grid: { display: false } },
+        y: { title: { display: true, text: yLabel }, beginAtZero: true },
+      },
+      plugins: { legend: { position: "top", align: "end" }, tooltip: { mode: "index", intersect: false } },
+      interaction: { mode: "index", intersect: false },
+    },
+  });
+}
+
+function renderCharts(days) {
+  const labels = days.map(d => d.date);
+  if (energyChart) energyChart.destroy();
+  if (costChart) costChart.destroy();
+  energyChart = makeBarChart("energyChart", labels, [
+    { label: "Total load",    data: days.map(d => d.load_kwh),   backgroundColor: "#4a6fa5" },
+    { label: "Grid imports",  data: days.map(d => d.import_kwh), backgroundColor: "#d97757" },
+  ], "kWh");
+  costChart = makeBarChart("costChart", labels, [
+    { label: "Without solar/battery", data: days.map(d => d.cost_no_solar), backgroundColor: "#d97757" },
+    { label: "Actual",                data: days.map(d => d.cost_actual),   backgroundColor: "#4a8f4a" },
+  ], "AUD");
+}
+
+function applyPreset(preset) {
+  const all = DATA.days;
+  if (!all.length) return;
+  const last = all[all.length - 1].date;
+  let startDate;
+  if (preset === "all") startDate = all[0].date;
+  else {
+    const n = parseInt(preset, 10);
+    const d = new Date(`${last}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() - (n - 1));
+    startDate = d.toISOString().slice(0, 10);
+  }
+  document.getElementById("start").value = startDate;
+  document.getElementById("end").value = last;
+  renderDaily();
+}
+
+function renderDaily() {
+  const start = document.getElementById("start").value;
+  const end = document.getElementById("end").value;
+  const slice = sliceDays(DATA.days, start, end);
+  renderKpis(slice);
+  renderCharts(slice);
+}
+
+// ---------- day detail: log file fetch + parse ----------
+
+function candidateFilenames(dateStr) {
+  // The Sydney calendar day for `dateStr` spans portions of two raw log files:
+  // power_*.parquet rolls at 11:00 UTC (= 21:00 Sydney AEST), and Fern *.gz
+  // rolls at ~10:00 Sydney. So we always try the file matching dateStr and the
+  // previous date for both formats; the live `Fern` is added if dateStr is today.
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  const prev = new Date(d.getTime() - 86_400_000);
+  const prevStr = prev.toISOString().slice(0, 10);
+  const candidates = [
+    `power_${prevStr}.parquet`,
+    `power_${dateStr}.parquet`,
+    `Fern ${prevStr}.gz`,
+    `Fern ${dateStr}.gz`,
+    `utility_${prevStr}.parquet`,
+    `utility_${dateStr}.parquet`,
+  ];
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Australia/Sydney', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+  if (dateStr === today) candidates.push("Fern");
+  return candidates.filter(name => LOG_FILES.has(name));
+}
+
+async function loadParquet(name) {
+  const url = `log/${encodeURIComponent(name)}`;
+  const file = await asyncBufferFromUrl({ url });
+  const rows = await parquetReadObjects({ file });
+  const out = [];
+  for (const r of rows) {
+    let t = r._time ?? r.time;
+    if (typeof t === "bigint") t = Number(t / 1_000_000n);          // ns -> ms
+    else if (t instanceof Date) t = t.getTime();
+    else if (typeof t === "number" && t > 1e14) t = t / 1e6;        // ns Number -> ms
+    else if (typeof t === "number" && t < 1e12) t = t * 1000;       // sec -> ms
+    if (!Number.isFinite(t)) continue;
+    out.push({
+      t,
+      load: numOrNull(r.load_power),
+      inv:  numOrNull(r.inverter_power),
+      meter: numOrNull(r.meter_power),
+      batt: numOrNull(r.battery_power),
+      imp:  numOrNull(r.import_power),
+      exp:  numOrNull(r.export_power),
+    });
+  }
+  return out;
+}
+
+async function loadGzCsv(name) {
+  const url = `log/${encodeURIComponent(name)}`;
+  const buf = await (await fetch(url)).arrayBuffer();
+  const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
+  const text = await new Response(stream).text();
+  return parseFernCsv(text);
+}
+
+async function loadLive(name) {
+  const text = await (await fetch(`log/${encodeURIComponent(name)}`)).text();
+  return parseFernCsv(text);
+}
+
+function parseFernCsv(text) {
+  const lines = text.split("\n");
+  if (!lines.length) return [];
+  const header = lines[0].split(",").map(s => s.trim());
+  const idx = Object.fromEntries(header.map((c, i) => [c, i]));
+  const cT = idx.time, cL = idx.load_power, cI = idx.inverter_power,
+        cM = idx.meter_power, cB = idx.battery_power;
+  const out = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const p = line.split(",");
+    const t = parseFloat(p[cT]);
+    if (!Number.isFinite(t)) continue;
+    out.push({
+      t: t * 1000,
+      load: numOrNull(p[cL]),
+      inv:  numOrNull(p[cI]),
+      meter: numOrNull(p[cM]),
+      batt: numOrNull(p[cB]),
+      imp: null, exp: null,
+    });
+  }
+  return out;
+}
+
+function numOrNull(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const n = typeof v === "number" ? v : parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function loadFile(name) {
+  if (name.endsWith(".parquet")) return loadParquet(name);
+  if (name.endsWith(".gz"))      return loadGzCsv(name);
+  return loadLive(name);
+}
+
+// ---------- day detail: bin + render ----------
+
+function downsampleToMinute(rows, startMs) {
+  const bins = new Array(1440);
+  for (let i = 0; i < 1440; i++) {
+    bins[i] = { sum: [0, 0, 0, 0, 0, 0], n: [0, 0, 0, 0, 0, 0] };
+  }
+  const endMs = startMs + 1440 * 60_000;
+  const keys = ["load", "inv", "meter", "batt", "imp", "exp"];
+  for (const r of rows) {
+    if (r.t < startMs || r.t >= endMs) continue;
+    const b = bins[(r.t - startMs) / 60_000 | 0];
+    for (let k = 0; k < keys.length; k++) {
+      const v = r[keys[k]];
+      if (v !== null) { b.sum[k] += v; b.n[k]++; }
+    }
+  }
+  const out = { t: new Array(1440), load: [], inv: [], meter: [], batt: [], imp: [], exp: [] };
+  for (let i = 0; i < 1440; i++) {
+    out.t[i] = startMs + i * 60_000;
+    const b = bins[i];
+    for (let k = 0; k < keys.length; k++) {
+      out[keys[k]].push(b.n[k] > 0 ? b.sum[k] / b.n[k] : null);
+    }
+  }
+  return out;
+}
+
+function renderDayChart(bin) {
+  const labels = bin.t.map(ms => hhmm.format(new Date(ms)));
+  const ds = (label, color, data) => ({
+    label, data, borderColor: color, backgroundColor: color + "33",
+    borderWidth: 1.5, pointRadius: 0, tension: 0.1, spanGaps: false,
+  });
+  const importsKw = bin.meter.map(v => v == null ? null : Math.max(0,  v) / 1000);
+  const exportsKw = bin.meter.map(v => v == null ? null : Math.max(0, -v) / 1000);
+  const datasets = [
+    ds("Usage",   "#4a6fa5", bin.load.map(v => v == null ? null : v / 1000)),
+    ds("Solar",   "#e0a020", bin.inv .map(v => v == null ? null : v / 1000)),
+    ds("Imports", "#d97757", importsKw),
+    ds("Exports", "#4a8f4a", exportsKw),
+  ];
+  if (bin.batt.some(v => v != null)) {
+    datasets.push(ds("Battery", "#8c5cb8", bin.batt.map(v => v == null ? null : v / 1000)));
+  }
+
+  if (dayChart) dayChart.destroy();
+  dayChart = new Chart(document.getElementById("dayChart"), {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      scales: {
+        x: { ticks: { maxTicksLimit: 12, autoSkip: true }, grid: { display: false } },
+        y: { title: { display: true, text: "kW" }, beginAtZero: false },
+      },
+      plugins: { legend: { position: "top", align: "end" }, tooltip: { mode: "index", intersect: false } },
+      interaction: { mode: "index", intersect: false },
+    },
+  });
+}
+
+async function loadDayDetail(dateStr) {
+  const token = ++dayLoadToken;
+  const status = document.getElementById("dayStatus");
+  const files = candidateFilenames(dateStr);
+  if (!files.length) {
+    status.textContent = "no log files for this date";
+    if (dayChart) { dayChart.destroy(); dayChart = null; }
+    return;
+  }
+  status.textContent = `loading ${files.length} file${files.length === 1 ? "" : "s"}…`;
+  try {
+    const t0 = performance.now();
+    const datasets = await Promise.all(files.map(loadFile));
+    if (token !== dayLoadToken) return;  // user switched dates again
+    const rows = [].concat(...datasets);
+    const startMs = sydneyDayStartUtc(dateStr);
+    const bin = downsampleToMinute(rows, startMs);
+    renderDayChart(bin);
+    const ms = (performance.now() - t0) | 0;
+    status.textContent = `${rows.length.toLocaleString()} samples from ${files.join(" + ")}  (${ms} ms)`;
+  } catch (err) {
+    console.error(err);
+    status.textContent = `error: ${err.message}`;
+  }
+}
+
+// ---------- bootstrap ----------
+
+async function main() {
+  DATA = await (await fetch("daily.json", { cache: "no-cache" })).json();
+  LOG_FILES = new Set(DATA.log_files || []);
+  const first = DATA.days[0].date;
+  const last = DATA.days[DATA.days.length - 1].date;
+  for (const id of ["start", "end", "dayPicker"]) {
+    const el = document.getElementById(id);
+    el.min = first; el.max = last;
+  }
+  document.getElementById("subtitle").textContent =
+    `${DATA.days.length} days  ·  ${first} to ${last}  ·  Peak ${DATA.tariff.peak_window}  ` +
+    `(${DATA.tariff.peak_c_per_kwh}c peak / ${DATA.tariff.offpeak_c_per_kwh}c off-peak / ` +
+    `${DATA.tariff.feed_in_c_per_kwh}c feed-in / ${DATA.tariff.supply_c_per_day}c/day supply)`;
+  document.getElementById("footer").textContent = "Generated " + DATA.generated_at;
+
+  applyPreset(document.getElementById("preset").value);
+  document.getElementById("preset").addEventListener("change", e => {
+    if (e.target.value !== "custom") applyPreset(e.target.value);
+  });
+  for (const id of ["start", "end"]) {
+    document.getElementById(id).addEventListener("change", () => {
+      document.getElementById("preset").value = "custom";
+      renderDaily();
+    });
+  }
+
+  const dayPicker = document.getElementById("dayPicker");
+  dayPicker.value = last;
+  dayPicker.addEventListener("change", () => loadDayDetail(dayPicker.value));
+  loadDayDetail(last);
+}
+
+main().catch(err => {
+  document.getElementById("subtitle").textContent =
+    "Failed to load daily.json — run `python energy.py` first.";
+  console.error(err);
+});
+</script>
+
+</body>
+</html>

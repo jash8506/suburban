@@ -12,7 +12,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 import requests
 import urllib3
 from csv_logger import CSV_Handler
-from dbfilter import DeadbandFilter
+from dbfilter import DeviceFilter
 
 # battery inverter uses a self-signed cert; we poll it with verify=False
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -35,10 +35,27 @@ EMPTY_ENTRY = {
 }
 
 
-dbf_settings = {"inverter_power": 15, "meter_power": 15, "battery_power": 15}
-deadbandFilter = DeadbandFilter(dbf_settings, 15000, debug=False)
-last_point = {}
-in_outage = False
+# Each device's fields are deadband-filtered and logged independently, keyed
+# off that device's primary power field, so one device going offline (e.g. the
+# solar inverter dropping off wifi) can't stall logging for the others.
+# load_power is derived from all three, so it gets its own filter and simply
+# pauses while any input is missing.
+DEADBAND_W = 15
+MAX_SAVE_INTERVAL_S = 15000
+device_filters = [
+    DeviceFilter("inverter", "inverter_power", ["inverter_power"],
+                 DEADBAND_W, MAX_SAVE_INTERVAL_S),
+    DeviceFilter("meter", "meter_power",
+                 ["meter_power", "meter_volts", "meter_amps", "meter_va",
+                  "meter_var", "meter_w_dmd", "meter_w_dmd_peak", "meter_pf",
+                  "meter_hz"],
+                 DEADBAND_W, MAX_SAVE_INTERVAL_S),
+    DeviceFilter("battery", "battery_power",
+                 ["battery_power", "battery_inverter_temp"],
+                 DEADBAND_W, MAX_SAVE_INTERVAL_S),
+    DeviceFilter("load", "load_power", ["load_power"],
+                 DEADBAND_W, MAX_SAVE_INTERVAL_S),
+]
 
 # Sample behind wall clock so every device poller has had time to put bracketing
 # readings on either side of the query time. Must be larger than the slowest
@@ -222,10 +239,11 @@ def fetch_inverter():
 
 
 # The Solplanet wifi dongle falls over if hit with overlapping or rapid-fire
-# requests, so every call to 192.168.0.137 funnels through this gate — it
-# serializes requests and enforces at least 5 s between request *starts*.
+# requests, so every call to it funnels through this gate — it serializes
+# requests and enforces at least 5 s between request *starts*.
 # A single Session is reused so we keep one keep-alive TCP+TLS connection open
 # instead of churning the dongle's tiny connection table on every poll.
+_SOLPLANET_HOST = "192.168.0.137"
 _solplanet_lock = threading.Lock()
 _solplanet_last_request = 0.0
 _SOLPLANET_MIN_GAP_S = 5.0
@@ -233,6 +251,27 @@ _solplanet_last_wake = 0.0
 _SOLPLANET_WAKE_MIN_GAP_S = 10.0
 _solplanet_session = requests.Session()
 _solplanet_session.verify = False
+
+
+def _solplanet_iface():
+    """Resolve the egress interface toward the dongle at runtime.
+
+    The Wi-Fi interface name is not stable across this host — it has already
+    changed once (wlp58s0 -> wlan0), which silently broke the arping below
+    because it targeted an interface that no longer existed. Ask the kernel
+    which interface routes to the dongle instead of hardcoding a name."""
+    try:
+        out = subprocess.run(
+            ["ip", "route", "get", _SOLPLANET_HOST],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        ).stdout.split()
+        if "dev" in out:
+            return out[out.index("dev") + 1]
+    except Exception as e:
+        print(f"[solplanet] iface lookup failed: {e}")
+    return None
 
 
 def _wake_solplanet():
@@ -249,21 +288,25 @@ def _wake_solplanet():
 
     arping (vs. ICMP ping) targets the bridge FDB at L2 directly, which is the
     layer that's actually aging out — and works even when the IP path is
-    wedged. Needs sudo + an explicit interface."""
+    wedged. Needs sudo + an explicit interface (resolved at runtime)."""
     global _solplanet_last_wake
     since = time.monotonic() - _solplanet_last_wake
     if since < _SOLPLANET_WAKE_MIN_GAP_S:
         print(f"[solplanet] wake arping skipped (last was {since:.1f}s ago)")
         return
     _solplanet_last_wake = time.monotonic()
+    iface = _solplanet_iface()
+    if iface is None:
+        print(f"[solplanet] wake arping skipped (no route to {_SOLPLANET_HOST})")
+        return
     try:
         result = subprocess.run(
-            ["sudo", "arping", "-c", "2", "-w", "3", "-I", "wlp58s0", "192.168.0.137"],
+            ["sudo", "arping", "-c", "2", "-w", "3", "-I", iface, _SOLPLANET_HOST],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=6,
         )
-        print(f"[solplanet] wake arping rc={result.returncode}")
+        print(f"[solplanet] wake arping rc={result.returncode} via {iface}")
     except Exception as e:
         print(f"[solplanet] wake arping failed: {e}")
 
@@ -304,7 +347,7 @@ def solplanet_get(url):
 
 def fetch_battery():
     resp = solplanet_get(
-        "https://192.168.0.137/getdevdata.cgi?device=2&sn=PB50005S125C0610"
+        f"https://{_SOLPLANET_HOST}/getdevdata.cgi?device=2&sn=PB50005S125C0610"
     )
     resp.raise_for_status()
     j = resp.json()
@@ -332,7 +375,7 @@ for p in pollers:
 
 def fetch_soc():
     resp = solplanet_get(
-        "https://192.168.0.137/getdevdata.cgi?device=4&sn=PB50005S125C0610"
+        f"https://{_SOLPLANET_HOST}/getdevdata.cgi?device=4&sn=PB50005S125C0610"
     )
     resp.raise_for_status()
     soc = resp.json().get("soc")
@@ -425,34 +468,7 @@ def _write_power(payload):
         )
 
 
-def write_direct(payload):
-    # Bypass the deadband filter (used when a required input is missing so the
-    # filter can't run). Still records whatever non-time fields we have.
-    global last_point
-    if not any(v is not None for k, v in payload.items() if k != "time"):
-        return
-    _write_raw(payload)
-    _write_power(payload)
-    last_point = payload
-
-
-def flush_through_filter(payload):
-    global last_point
-    _write_raw(payload)
-    filter_input = {
-        "time": payload["time"],
-        **{k: payload[k] for k in dbf_settings},
-    }
-    save_point = deadbandFilter.filter(filter_input)
-    # The filter returns the *previous* sample it decided to keep; `last_point`
-    # holds that sample's full payload, so we log/push last_point.
-    if save_point and last_point:
-        _write_power(last_point)
-    last_point = payload
-
-
 def sample_once():
-    global deadbandFilter, last_point, in_outage
     target = datetime.datetime.now().timestamp() - QUERY_LAG_S
     payload = EMPTY_ENTRY.copy()
     payload["time"] = target
@@ -462,19 +478,11 @@ def sample_once():
             for k, v in data.items():
                 payload[k] = v
     _fill_load_power(payload)
-
-    if all(payload.get(k) is not None for k in dbf_settings):
-        if in_outage:
-            # Recovery: the filter's pre-outage bounds and last_saved_time would
-            # trigger a spurious forced-save on the first post-outage sample, so
-            # start fresh.
-            deadbandFilter = DeadbandFilter(dbf_settings, 15000, debug=False)
-            last_point = {}
-            in_outage = False
-        flush_through_filter(payload)
-    else:
-        write_direct(payload)
-        in_outage = True
+    _write_raw(payload)
+    for f in device_filters:
+        point = f.process(payload)
+        if point:
+            _write_power(point)
 
 
 loop_period = 1.0 / LOOP_HZ
@@ -497,9 +505,10 @@ while True:
         print(f"[main] loop overrun: {elapsed:.3f}s")
     now = time.monotonic()
     if now - last_loop_heartbeat >= 60:
+        outages = ",".join(f.name for f in device_filters if f.in_outage) or "none"
         print(
             f"[main] heartbeat: iters={loop_iters} errors={loop_errors} "
-            f"overruns={loop_overruns} in_outage={in_outage}"
+            f"overruns={loop_overruns} outages={outages}"
         )
         loop_iters = loop_errors = loop_overruns = 0
         last_loop_heartbeat = now

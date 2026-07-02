@@ -47,7 +47,10 @@ class DeadbandFilter:
     def filter(self, data_point):
         """filter() - filter a data point
            data_point is a dictionary which must contain a 'time' key
-           and a set of keys which is consistent between each call """
+           and a set of keys which is consistent between each call
+
+           Returns the *previous* data point when it decides one should be
+           saved, or None."""
 
         if self.first_call:
             self.keys = [k for k in data_point.keys() if k != 'time']
@@ -113,6 +116,58 @@ class DeadbandFilter:
             if self.debug:
                 print('Saving ', self.save_datapoint)
         return self.save_datapoint
+
+
+class DeviceFilter:
+    """Deadband-filter one device's field group independently of the other
+    devices, so one device going offline can't stall logging for the rest.
+
+    Watches a single key (the device's primary power field) through a
+    DeadbandFilter; when that filter decides a sample should be saved, emits
+    the full field group from the same sample. A None in the watched key
+    means the device has no data at that sample: the last good sample is
+    flushed once so the gap edge is recorded, then the filter restarts fresh
+    on recovery so pre-gap bounds can't force a spurious save across the gap."""
+
+    def __init__(self, name, watch, fields, deadband, max_interval_s, debug=False):
+        self.name = name
+        self.watch = watch
+        self.fields = fields
+        self._deadband = deadband
+        self._max_interval_s = max_interval_s
+        self._debug = debug
+        self._filter = None
+        self._last_point = None
+        self.in_outage = True
+
+    def process(self, payload):
+        """Feed one sample (dict with 'time' plus fields, missing values None).
+        Returns a point to log ('time' plus this device's fields), or None."""
+        value = payload.get(self.watch)
+        if value is None:
+            flush = None
+            if not self.in_outage:
+                # Device just dropped out: emit the last good sample so the
+                # gap has a clean edge, and discard filter state.
+                flush = self._last_point
+                self.in_outage = True
+                self._filter = None
+                self._last_point = None
+            return flush
+        if self._filter is None:
+            self._filter = DeadbandFilter(
+                {self.watch: self._deadband}, self._max_interval_s, debug=self._debug
+            )
+            self.in_outage = False
+        save = self._filter.filter({"time": payload["time"], self.watch: value})
+        # The filter returns the *previous* sample it decided to keep;
+        # _last_point holds that sample's full field group.
+        out = self._last_point if (save and self._last_point) else None
+        self._last_point = {
+            "time": payload["time"],
+            **{k: payload.get(k) for k in self.fields},
+        }
+        return out
 
 
 

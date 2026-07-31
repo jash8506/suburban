@@ -131,7 +131,8 @@ class DevicePoller(threading.Thread):
     larger than `max_gap_s` (which indicates the device went offline)."""
 
     def __init__(
-        self, name, fetch_fn, history_size=300, min_interval=0.25, max_gap_s=30
+        self, name, fetch_fn, history_size=300, min_interval=0.25, max_gap_s=30,
+        diag=None
     ):
         super().__init__(daemon=True, name=f"poller-{name}")
         self.name = name
@@ -140,6 +141,7 @@ class DevicePoller(threading.Thread):
         self._lock = threading.Lock()
         self._min_interval = min_interval
         self._max_gap_s = max_gap_s
+        self._diag = diag
 
     def run(self):
         ok = fail = empty = 0
@@ -155,7 +157,15 @@ class DevicePoller(threading.Thread):
                 failed = True
                 fail += 1
                 print(f"[{self.name}] poll failed after {time.monotonic()-started:.2f}s: {e}")
-            slowest = max(slowest, time.monotonic() - started)
+            latency = time.monotonic() - started
+            slowest = max(slowest, latency)
+            if self._diag is not None:
+                # Record every completed attempt. "empty" (no exception but no
+                # usable data) is kept distinct from "fail" to match the
+                # heartbeat's ok/fail/empty split.
+                self._diag.record_read(
+                    "fail" if failed else ("ok" if data else "empty"), latency
+                )
             if data:
                 ok += 1
                 ts = datetime.datetime.now().timestamp()
@@ -212,6 +222,65 @@ class DevicePoller(threading.Thread):
             if v0 is not None and v1 is not None:
                 out[k] = v0 + frac * (v1 - v0)
         return out
+
+
+class DeviceDiag:
+    """Per-device diagnostic counters, snapshotted and reset once a minute by
+    diag_loop() and written to the 'diagnostics' Influx measurement (one point
+    per device, tagged `device`) so a separate Grafana dashboard can show read
+    health and deadband compression per device, independently of the power data.
+
+    Every read source records its attempts here (the DevicePoller threads and
+    bms_loop via record_read); sample_once records deadband drops via record_drop.
+    All counters are cheap ints behind one lock, so recording is contention-free
+    for the poller threads."""
+
+    def __init__(self, name):
+        self.name = name
+        self._lock = threading.Lock()
+        self._ok = 0
+        self._fail = 0
+        self._empty = 0
+        self._latency_sum = 0.0
+        self._latency_n = 0
+        self._drops = 0
+
+    def record_read(self, outcome, latency_s):
+        # outcome is "ok", "fail" or "empty" ("empty" = the device answered but
+        # returned no usable data, e.g. the dongle replying without a pac field).
+        # Latency is recorded for every attempt including failures, so a link
+        # going slow (rising avg latency) shows up before it starts timing out.
+        with self._lock:
+            if outcome == "ok":
+                self._ok += 1
+            elif outcome == "fail":
+                self._fail += 1
+            else:
+                self._empty += 1
+            self._latency_sum += latency_s
+            self._latency_n += 1
+
+    def record_drop(self):
+        with self._lock:
+            self._drops += 1
+
+    def snapshot_reset(self):
+        """Return the counts accumulated since the last call and zero them."""
+        with self._lock:
+            ok, fail, empty = self._ok, self._fail, self._empty
+            lat_sum, lat_n, drops = self._latency_sum, self._latency_n, self._drops
+            self._ok = self._fail = self._empty = 0
+            self._latency_sum = 0.0
+            self._latency_n = 0
+            self._drops = 0
+        avg_latency = (lat_sum / lat_n) if lat_n else None
+        return {
+            "ok": ok,
+            "fail": fail,
+            "empty": empty,
+            "avg_latency": avg_latency,
+            "drops": drops,
+        }
 
 
 def fetch_power_mon():
@@ -385,15 +454,38 @@ def fetch_battery():
     return out
 
 
+# Per-device diagnostic counters, flushed to Influx every minute by diag_loop().
+# Keyed by a canonical device name: the meter's poller is "power_mon" but we tag
+# it "meter" to match its deadband filter, and the battery is split into its two
+# separate dongle reads — device=2 (power/temp, fetch_battery) and device=4 (BMS
+# SOC/voltage, fetch_bms) — since the user tracks them as two devices.
+diagnostics = {
+    "meter": DeviceDiag("meter"),
+    "inverter": DeviceDiag("inverter"),
+    "battery_dev2": DeviceDiag("battery_dev2"),
+    "battery_dev4": DeviceDiag("battery_dev4"),
+    "load": DeviceDiag("load"),
+}
+# Maps each DeviceFilter's name to the diagnostics key its deadband drops feed.
+# (battery_dev4 has no entry: BMS data is written straight to Influx, never
+# deadband-filtered, so it has no drops.)
+_FILTER_DIAG = {
+    "inverter": "inverter",
+    "meter": "meter",
+    "battery": "battery_dev2",
+    "load": "load",
+}
+
 pollers = [
-    DevicePoller("power_mon", fetch_power_mon),
-    DevicePoller("inverter", fetch_inverter),
+    DevicePoller("power_mon", fetch_power_mon, diag=diagnostics["meter"]),
+    DevicePoller("inverter", fetch_inverter, diag=diagnostics["inverter"]),
     # The Solplanet wifi dongle is flaky — it delivers at most ~1 reading/10 s and
     # drops out for tens of minutes at a time. Poll gently (every 30 s, well above
     # its ~2.5 s natural fetch time) to reduce pressure on it. max_gap_s=180 keeps
     # history across a few missed polls but discards it after a real dropout so we
     # don't interpolate a straight line across a multi-minute hole.
-    DevicePoller("battery", fetch_battery, min_interval=30, max_gap_s=180),
+    DevicePoller("battery", fetch_battery, min_interval=30, max_gap_s=180,
+                 diag=diagnostics["battery_dev2"]),
 ]
 for p in pollers:
     p.start()
@@ -442,10 +534,12 @@ def fetch_bms():
 # require QUERY_LAG_S > 300 s). The single device=4 request keeps load off the
 # flaky dongle.
 def bms_loop():
+    diag = diagnostics["battery_dev4"]
     while True:
         started = time.monotonic()
         try:
             fields = fetch_bms()
+            diag.record_read("ok" if fields else "empty", time.monotonic() - started)
             if fields:
                 write_api.write(
                     bucket=bucket,
@@ -471,6 +565,7 @@ def bms_loop():
             else:
                 print("[bms] no battery fields in response")
         except Exception as e:
+            diag.record_read("fail", time.monotonic() - started)
             print(f"[bms] poll failed: {e}")
         elapsed = time.monotonic() - started
         if elapsed < 300:
@@ -478,6 +573,59 @@ def bms_loop():
 
 
 threading.Thread(target=bms_loop, daemon=True, name="poller-bms").start()
+
+
+def diag_loop():
+    """Once a minute, flush each device's diagnostic counters to the
+    'diagnostics' Influx measurement (one point per device, tagged `device`) and
+    print a summary line. Fields per device:
+      reads_ok / reads_fail / reads_empty — read attempt outcomes this minute
+      avg_latency_ms — mean latency over all completed attempts (incl. failures)
+      deadband_drops — samples the deadband filter held back (compression)
+    This feeds a dedicated Grafana dashboard (grafana/dashboards/diagnostics.json),
+    kept separate from the power data. The derived 'load' device and the BMS
+    'battery_dev4' read report only the fields that apply to them."""
+    while True:
+        started = time.monotonic()
+        stamp = datetime.datetime.now(tz=datetime.timezone.utc)
+        points = []
+        for name, d in diagnostics.items():
+            s = d.snapshot_reset()
+            fields = {
+                "reads_ok": s["ok"],
+                "reads_fail": s["fail"],
+                "reads_empty": s["empty"],
+                "deadband_drops": s["drops"],
+            }
+            if s["avg_latency"] is not None:
+                fields["avg_latency_ms"] = s["avg_latency"] * 1000.0
+            points.append(
+                {
+                    "measurement": "diagnostics",
+                    "time": stamp,
+                    "tags": {"device": name},
+                    "fields": fields,
+                }
+            )
+            lat = (
+                f"{s['avg_latency']*1000:.0f}ms"
+                if s["avg_latency"] is not None
+                else "-"
+            )
+            print(
+                f"[diag] {name}: ok={s['ok']} fail={s['fail']} empty={s['empty']} "
+                f"avg_latency={lat} deadband_drops={s['drops']}"
+            )
+        try:
+            write_api.write(bucket=bucket, org="fern", record=points)
+        except Exception as e:
+            print(f"[diag] influx write failed: {e}")
+        elapsed = time.monotonic() - started
+        if elapsed < 60:
+            time.sleep(60 - elapsed)
+
+
+threading.Thread(target=diag_loop, daemon=True, name="diag").start()
 
 
 def _fill_load_power(payload):
@@ -545,9 +693,15 @@ def sample_once():
     _fill_load_power(payload)
     _write_raw(payload)
     for f in device_filters:
+        had_value = payload.get(f.watch) is not None
         point = f.process(payload)
         if point:
             _write_power(point)
+        elif had_value:
+            # The device had a reading this sample but the deadband filter held
+            # it back (it fell inside the trajectory band) — count it as dropped.
+            # A missing reading (had_value False) is an outage, not a drop.
+            diagnostics[_FILTER_DIAG[f.name]].record_drop()
 
 
 loop_period = 1.0 / LOOP_HZ

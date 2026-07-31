@@ -17,13 +17,13 @@
   "graphTooltip": 1,
   "id": null,
   "links": [],
-  "description": "Per-device poll health from the 'diagnostics' measurement (written once a minute by logger.py). device tag values: meter, inverter, battery_dev2 (dongle device=2 power/temp), battery_dev4 (dongle device=4 BMS), load (derived).",
+  "description": "Per-device poll health from the 'diagnostics' measurement (written once a minute by logger.py). device tag values: meter, inverter, battery_dev2 (dongle device=2 power/temp), battery_dev4 (dongle device=4 BMS).",
   "panels": [
     {
       "id": 1,
       "type": "timeseries",
       "title": "Average read latency by device",
-      "description": "Mean latency over every completed read attempt in the minute, including failed/timed-out ones — rising latency is an early warning before outright failures. load has no reads (derived) so it never appears here.",
+      "description": "Mean latency over every completed read attempt in the minute, including failed/timed-out ones — rising latency is an early warning before outright failures.",
       "gridPos": { "x": 0, "y": 0, "h": 8, "w": 24 },
       "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
       "fieldConfig": {
@@ -59,7 +59,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Successful reads / min by device",
-      "description": "Count of reads that returned usable data in each minute. Healthy: meter & inverter ~ their poll rate; battery_dev2 ~ 2/min (30 s poll); battery_dev4 ~ 1/min (300 s poll ⇒ 0 most minutes, 1 every 5th).",
+      "description": "Count of reads that returned usable data in each minute. Healthy: meter & inverter ~ their poll rate; battery_dev2 ~ 6/min (10 s poll); battery_dev4 ~ 1 every 5 min (300 s poll ⇒ 0 most minutes).",
       "gridPos": { "x": 0, "y": 8, "h": 8, "w": 12 },
       "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
       "fieldConfig": {
@@ -130,45 +130,9 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Empty reads / min by device",
-      "description": "Reads that connected but returned no usable data (device answered without the expected field). Mainly a battery-dongle signal (a reply with no pac / no BMS fields).",
-      "gridPos": { "x": 0, "y": 16, "h": 8, "w": 12 },
-      "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "bars",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 60,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "spanNulls": false
-          },
-          "color": { "mode": "palette-classic" },
-          "unit": "short",
-          "displayName": "${__field.labels.device}"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
-          "query": "from(bucket: \"home\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"diagnostics\" and r[\"_field\"] == \"reads_empty\")\n  |> aggregateWindow(every: v.windowPeriod, fn: sum, createEmpty: false)"
-        }
-      ],
-      "options": {
-        "tooltip": { "mode": "multi", "sort": "desc" },
-        "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": [] }
-      }
-    },
-    {
-      "id": 5,
-      "type": "timeseries",
       "title": "Deadband drops / min by device",
-      "description": "Samples the per-device deadband filter held back (fell inside its trajectory band) each minute — the main loop feeds the filter at 3 Hz (~180/min) so this is the compression amount. Falls toward 0 when a device is in outage (no readings to drop). battery_dev4 is not deadband-filtered, so it never appears.",
-      "gridPos": { "x": 12, "y": 16, "h": 8, "w": 12 },
+      "description": "Samples the per-device deadband filter held back each minute. NOTE: the filter runs on the main loop's 3 Hz interpolated stream (~180 samples/min), NOT on raw reads — so this sits near ~180 for a healthy device regardless of its actual read rate, and falls toward 0 only during an outage (no readings to interpolate/drop). It measures logged-output compression, not read health — use the reads/latency panels for that. battery_dev4 is not deadband-filtered, so it stays at 0.",
+      "gridPos": { "x": 0, "y": 16, "h": 8, "w": 24 },
       "datasource": { "type": "influxdb", "uid": "influxdb-fern" },
       "fieldConfig": {
         "defaults": {

@@ -59,8 +59,10 @@ device_filters = [
 
 # Sample behind wall clock so every device poller has had time to put bracketing
 # readings on either side of the query time. Must be larger than the slowest
-# device's natural poll interval (battery ~5 s).
-QUERY_LAG_S = 15
+# device's poll interval (battery polls every ~30 s) so its newest reading is
+# behind the query time, and smaller than the fast pollers' history window
+# (history_size / poll rate) so their readings still bracket the query time.
+QUERY_LAG_S = 35
 LOOP_HZ = 3
 
 # (column, float precision) — used for CSV formatting and header
@@ -129,7 +131,7 @@ class DevicePoller(threading.Thread):
     larger than `max_gap_s` (which indicates the device went offline)."""
 
     def __init__(
-        self, name, fetch_fn, history_size=100, min_interval=0.25, max_gap_s=30
+        self, name, fetch_fn, history_size=300, min_interval=0.25, max_gap_s=30
     ):
         super().__init__(daemon=True, name=f"poller-{name}")
         self.name = name
@@ -249,6 +251,11 @@ _solplanet_last_request = 0.0
 _SOLPLANET_MIN_GAP_S = 5.0
 _solplanet_last_wake = 0.0
 _SOLPLANET_WAKE_MIN_GAP_S = 10.0
+# Proactively arping the dongle on this cadence keeps the router's bridge FDB /
+# ARP cache from aging out its MAC during the idle gaps between polls — gaps that
+# grew when we slowed the poll rate. It's an L2-only nudge and shares the wake
+# rate limiter above, so it costs the dongle's HTTP stack nothing.
+_SOLPLANET_KEEPALIVE_S = 60.0
 _solplanet_session = requests.Session()
 _solplanet_session.verify = False
 
@@ -275,20 +282,21 @@ def _solplanet_iface():
 
 
 def _wake_solplanet():
-    """Best-effort: ARP-probe the dongle to refresh stale AP bridge FDB / ARP
-    state. The dongle has been observed unreachable after long idle gaps even
-    though it answers fine once any traffic gets through to wake the path.
+    """Best-effort: ARP-probe the dongle to refresh stale ARP / AP client state.
+    The dongle has been observed unreachable after long idle gaps even though it
+    answers fine once any traffic gets through to wake the path.
 
-    Root cause is the ISP-provided router doing 5 GHz ↔ 2.4 GHz band bridging
-    poorly: the NUC is on 5 GHz, the Solplanet dongle is 2.4 GHz only, and the
-    router's bridging FDB seems to age out / lose the dongle's MAC after idle
-    periods. Any traffic in either direction re-populates the table and the
-    path comes back. This is a workaround for that router — not something we
-    can fix in software.
+    The NUC and the 2.4 GHz-only dongle are both on the Telstra modem's 2.4 GHz
+    SSID, so this is not a cross-band bridging problem — the dongle appears to get
+    parked by the AP's power-save (APSD) buffering / client-inactivity aging after
+    idle, and stale ARP compounds it. Any traffic wakes the path back up.
 
-    arping (vs. ICMP ping) targets the bridge FDB at L2 directly, which is the
-    layer that's actually aging out — and works even when the IP path is
-    wedged. Needs sudo + an explicit interface (resolved at runtime)."""
+    NOTE (2026-07): APSD was turned off and the modem's 2.4 GHz radio pinned to
+    802.11b/g/n + 20 MHz, which may make this wake path (and solplanet_keepalive_
+    loop) unnecessary — remove both once ~a week of logs confirms no dropouts.
+
+    arping (vs. ICMP ping) works even when the IP path is wedged, and needs sudo
+    + an explicit interface (resolved at runtime)."""
     global _solplanet_last_wake
     since = time.monotonic() - _solplanet_last_wake
     if since < _SOLPLANET_WAKE_MIN_GAP_S:
@@ -309,6 +317,21 @@ def _wake_solplanet():
         print(f"[solplanet] wake arping rc={result.returncode} via {iface}")
     except Exception as e:
         print(f"[solplanet] wake arping failed: {e}")
+
+
+def solplanet_keepalive_loop():
+    """Periodically wake the L2 path to the dongle so its MAC never ages out of
+    the router's bridge FDB. _wake_solplanet already runs reactively after a
+    failed request; this adds a steady proactive cadence so the path stays warm
+    through the (now longer) idle gaps between polls and recovers faster during a
+    dropout. Reuses _wake_solplanet, so its rate limiter suppresses a keepalive
+    tick that lands right after a reactive wake."""
+    while True:
+        try:
+            _wake_solplanet()
+        except Exception as e:
+            print(f"[solplanet] keepalive failed: {e}")
+        time.sleep(_SOLPLANET_KEEPALIVE_S)
 
 
 def solplanet_get(url):
@@ -365,32 +388,65 @@ def fetch_battery():
 pollers = [
     DevicePoller("power_mon", fetch_power_mon),
     DevicePoller("inverter", fetch_inverter),
-    # Solplanet wifi dongle drops out intermittently under load; poll every ~5 s
-    # (well above its ~2.5 s natural fetch time) to reduce pressure on it.
-    DevicePoller("battery", fetch_battery, min_interval=10, max_gap_s=60),
+    # The Solplanet wifi dongle is flaky — it delivers at most ~1 reading/10 s and
+    # drops out for tens of minutes at a time. Poll gently (every 30 s, well above
+    # its ~2.5 s natural fetch time) to reduce pressure on it. max_gap_s=180 keeps
+    # history across a few missed polls but discards it after a real dropout so we
+    # don't interpolate a straight line across a multi-minute hole.
+    DevicePoller("battery", fetch_battery, min_interval=30, max_gap_s=180),
 ]
 for p in pollers:
     p.start()
 
+threading.Thread(
+    target=solplanet_keepalive_loop, daemon=True, name="solplanet-keepalive"
+).start()
 
-def fetch_soc():
+
+def fetch_bms():
+    """Battery BMS data (device=4): state-of-charge, DC pack voltage, pack
+    temperature and DC battery power. All come back in the same response, so we
+    read them together and spare the flaky dongle extra requests."""
     resp = solplanet_get(
         f"https://{_SOLPLANET_HOST}/getdevdata.cgi?device=4&sn=PB50005S125C0610"
     )
     resp.raise_for_status()
-    soc = resp.json().get("soc")
-    return None if soc is None else float(soc)
+    j = resp.json()
+    out = {}
+    soc = j.get("soc")
+    if soc is not None:
+        out["battery_soc"] = float(soc)
+    vb = j.get("vb")
+    if vb is not None:
+        # vb is the pack voltage in centivolts (e.g. 5490 -> 54.90 V)
+        out["battery_voltage"] = vb / 100.0
+    tb = j.get("tb")
+    if tb is not None:
+        # tb is the pack temperature in deci-degrees C (e.g. 230 -> 23.0 C)
+        out["battery_pack_temp"] = tb / 10.0
+    pb = j.get("pb")
+    if pb is not None:
+        # DC power at the battery as reported by the BMS, in watts. Sign
+        # convention (which polarity is charging) is not yet confirmed for this
+        # register, so don't trust it on a dashboard until verified against
+        # battery_power (device=2's pac, which is negative when charging per the
+        # load balance) during a known charge or discharge. Kept as a distinct
+        # field from battery_power regardless.
+        out["battery_dc_power"] = float(pb)
+    return out
 
 
-# SOC changes slowly and lives on a different endpoint; poll on its own 60 s
-# cadence and write straight to Influx rather than interpolating through the
-# main sample loop (which would require a QUERY_LAG_S > 60 s).
-def soc_loop():
+# SOC, pack voltage, temperature and DC power all come from device=4 and change
+# slowly, so poll them gently on one shared 300 s cadence and write straight to
+# Influx rather than interpolating through the main sample loop (which would
+# require QUERY_LAG_S > 300 s). The single device=4 request keeps load off the
+# flaky dongle.
+def bms_loop():
     while True:
         started = time.monotonic()
         try:
-            soc = fetch_soc()
-            if soc is not None:
+            fields = fetch_bms()
+            if fields:
                 write_api.write(
                     bucket=bucket,
                     org="fern",
@@ -398,21 +454,30 @@ def soc_loop():
                         {
                             "measurement": "power",
                             "time": datetime.datetime.now(tz=datetime.timezone.utc),
-                            "fields": {"battery_soc": soc},
+                            "fields": fields,
                         },
                     ],
                 )
-                print(f"[soc] {soc:.0f}%")
+                parts = []
+                if "battery_soc" in fields:
+                    parts.append(f"soc={fields['battery_soc']:.0f}%")
+                if "battery_voltage" in fields:
+                    parts.append(f"vb={fields['battery_voltage']:.2f}V")
+                if "battery_pack_temp" in fields:
+                    parts.append(f"tb={fields['battery_pack_temp']:.1f}C")
+                if "battery_dc_power" in fields:
+                    parts.append(f"pb={fields['battery_dc_power']:.0f}W")
+                print(f"[bms] {' '.join(parts)}")
             else:
-                print("[soc] no soc field in response")
+                print("[bms] no battery fields in response")
         except Exception as e:
-            print(f"[soc] poll failed: {e}")
+            print(f"[bms] poll failed: {e}")
         elapsed = time.monotonic() - started
-        if elapsed < 60:
-            time.sleep(60 - elapsed)
+        if elapsed < 300:
+            time.sleep(300 - elapsed)
 
 
-threading.Thread(target=soc_loop, daemon=True, name="poller-soc").start()
+threading.Thread(target=bms_loop, daemon=True, name="poller-bms").start()
 
 
 def _fill_load_power(payload):

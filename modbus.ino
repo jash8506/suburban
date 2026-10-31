@@ -50,6 +50,33 @@ String registers[REG_COUNT] = {
 bool is_signed[REG_COUNT] = { false, true, true, false, true, false, false };
 #define DEBUG_MODE false
 
+// Pause between DHCP attempts while the Opta has no address.
+#define ETHERNET_RETRY_MS 30000
+unsigned long lastEthernetAttempt = 0;
+
+bool hasAddress() {
+  return !(Ethernet.localIP() == IPAddress(0, 0, 0, 0));
+}
+
+// Get a DHCP lease and start the web server. Ethernet.begin() only tries once, so
+// loop() calls this again while there's no address - after a power cut the Wi-Fi
+// bridge can take longer to come up than the Opta.
+void connectEthernet() {
+  bool ok = Ethernet.begin();
+  lastEthernetAttempt = millis();
+  if (!ok) {
+    if (DEBUG_MODE) {
+      Serial.println("No DHCP lease yet, will retry");
+    }
+    return;
+  }
+  server.begin();
+  if (DEBUG_MODE) {
+    Serial.print("Server is ready. Please connect to http://");
+    Serial.println(Ethernet.localIP());
+  }
+}
+
 void setup() {
   if (DEBUG_MODE) {
     Serial.begin(9600);
@@ -68,24 +95,15 @@ void setup() {
       ;
   }
 
-  // start the Ethernet connection:
-  if (!Ethernet.begin()) {
-    Serial.println("Failed to initialize Ethernet library");
-    return;
-  }
-
-  // Start to listen
-  server.begin();
-  if (DEBUG_MODE) {
-    Serial.println(("Server is ready."));
-    Serial.print("Please connect to http://");
-    Serial.println(Ethernet.localIP());
-  }
+  connectEthernet();
   Serial.end();
 }
 
 void loop() {
   Ethernet.maintain();
+  if (!hasAddress() && millis() - lastEthernetAttempt >= ETHERNET_RETRY_MS) {
+    connectEthernet();
+  }
   if (!server) {
     server.begin();
   }

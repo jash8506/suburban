@@ -279,7 +279,7 @@ class DeviceDiag:
 
 
 def fetch_power_mon():
-    resp = requests.get("http://192.168.0.146:80/power", timeout=4)
+    resp = requests.get("http://192.168.0.144:80/power", timeout=4)
     resp.raise_for_status()
     j = resp.json()
     # scaling factors from https://www.gavazzionline.com/pdf/EM511%20CP%20Rev1.8.pdf

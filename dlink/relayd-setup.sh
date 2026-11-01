@@ -61,6 +61,20 @@ else
 	echo "Saved current config to /root/config-before-relayd.tgz"
 fi
 
+# Moving the Wi-Fi side into the lan firewall zone opens SSH and LuCI to the whole main LAN.
+if [ -z "$(awk -F: '$1 == "root" { print $2 }' /etc/shadow)" ]; then
+	say "root has no password, and SSH/LuCI are about to be reachable from the whole main LAN - set one now"
+	passwd root || die "root password not set"
+fi
+
+# Discard half-staged changes if we stop before the final commit.
+COMMITTED=0
+cleanup() {
+	stty echo 2>/dev/null || true
+	[ "$COMMITTED" = 1 ] || for c in wireless network dhcp firewall; do uci -q revert "$c" || true; done
+}
+trap cleanup EXIT
+
 # --- 1. Wi-Fi client (station) link to the main router ------------------------
 RADIO=$(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device\$/\1/p" | head -n 1)
 [ -n "$RADIO" ] || die "no Wi-Fi radio in /etc/config/wireless"
@@ -121,18 +135,17 @@ fi
 MAIN_NET=${WWAN_IP%.*}
 [ -n "$MAIN_NET" ] || { a=$(wwan_addr); MAIN_NET=${a%.*}; }
 if [ -n "$MAIN_NET" ] && [ "${LAN_IP%.*}" = "$MAIN_NET" ]; then
-	uci revert wireless; uci revert network
 	die "LAN_IP $LAN_IP is inside the main LAN ($MAIN_NET.x) - pick another, e.g. LAN_IP=192.168.2.1"
 fi
 
 # --- 2. relayd package ---------------------------------------------------------
 if [ ! -x /usr/sbin/relayd ]; then
 	FREE=$(df -k /overlay 2>/dev/null | awk 'NR == 2 { print $4 }')
-	[ "${FREE:-0}" -ge 100 ] || { uci revert wireless; uci revert network; die "only ${FREE:-?} KB free on /overlay"; }
+	[ "${FREE:-0}" -ge 100 ] || die "only ${FREE:-?} KB free on /overlay"
 	say "Installing relayd"
 	if ! pkg_install relayd; then
 		[ "$CHANGE_WIFI" = 1 ] || [ -z "$(wwan_addr)" ] ||
-			{ uci revert wireless; uci revert network; die "couldn't download relayd although '$WWAN' is up - check DNS/internet (ping downloads.openwrt.org)"; }
+			die "couldn't download relayd although '$WWAN' is up - check DNS/internet (ping downloads.openwrt.org)"
 		say "Not online yet - bringing up the Wi-Fi client link first"
 		uci commit wireless
 		uci commit network
@@ -176,6 +189,7 @@ for n in "$WWAN" repeater_bridge; do
 done
 
 uci commit
+COMMITTED=1
 
 # --- done ----------------------------------------------------------------------
 if [ -n "$WWAN_IP" ]; then MAIN_ADDR=$WWAN_IP; else MAIN_ADDR="$(wwan_addr) (DHCP, may change)"; fi

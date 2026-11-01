@@ -1,140 +1,136 @@
-# D-Link DSL-2750B Wi-Fi bridge for the power monitor
+# D-Link DSL-2750B: Wi-Fi link for the power monitor
 
 The Arduino Opta power monitor only has Ethernet, so it hangs off an old D-Link DSL-2750B
-running OpenWrt, which joins the house Wi-Fi as a client and bridges its LAN ports onto
-the main network:
+running OpenWrt. The D-Link joins the house Wi-Fi as a client and acts as a small router
+for its LAN ports: it gives the Opta an address and forwards port 80 to it.
 
 ```
-main router 192.168.0.1  ~~Wi-Fi~~  D-Link (OpenWrt, relayd)  --Ethernet--  Arduino Opta  --RS485-->  EM112 meter
+main router 192.168.0.1  ~~Wi-Fi~~  D-Link 192.168.0.144  --Ethernet--  Opta 192.168.8.10  --RS485-->  EM112 meter
+                                    (LAN side 192.168.8.1)
 ```
 
-OpenWrt can't do a plain layer-2 bridge over a Wi-Fi client link, so it uses **relayd**
-(a "pseudo-bridge"): the Arduino gets its address from the main router via DHCP, but on the
-main LAN it shows up with the D-Link's MAC address (`3c:1e:04:52:ad:d5`).
+`logger.py` reads the meter at `http://192.168.0.144/power`, which is the D-Link's port
+forward to the Opta.
 
-## What we saw before setting this up (31 Oct 2026)
+## Current setup (1 Nov 2026)
 
-- The D-Link was on the main Wi-Fi at `192.168.0.144` (also answering ARP for `.250`), but
-  refused every TCP port. That is OpenWrt's default firewall on its upstream (`wan`) zone,
-  which means the Wi-Fi client link worked but nothing was bridged.
-- `logger.py` reads the meter at `192.168.0.144`, which the D-Link itself now holds, and
-  the Arduino wasn't reachable anywhere on `192.168.0.x`.
+| | |
+|---|---|
+| Firmware | OpenWrt 22.03.7, `bcm63xx/generic`. The board reports itself as `ADB P.DG A4001N`, so it was flashed with the image for that similar board. Everything used here works. |
+| Wi-Fi | Client of `DN8245V-996D` (the radio is 2.4 GHz only), network `wwan`, DHCP from the main router. The D-Link's own access point is disabled. |
+| Main-LAN address | `192.168.0.144`, MAC `3c:1e:04:52:ad:d5`. **Reserve this on the main router**: the logger depends on it. |
+| LAN side | `192.168.8.1/24` with DHCP on. Fixed lease `opta`: `a8:61:0a:50:4e:38` → `192.168.8.10`. |
+| Firewall | `wwan` is in the `wan` zone: incoming traffic is rejected and outgoing traffic is NATed. Two exceptions: the `Power-monitor` port forward (tcp 80 → `192.168.8.10:80`) and `Allow-SSH-from-laptop` (tcp 22 from `192.168.0.135` only). |
+| Login | `root`, **no password yet**. Set one with `passwd`. |
+| Leftovers | `relayd` and `luci-proto-relay` are installed but unused. `/root/firewall.before-bridge-fix` and `/root/config-before-router-mode.tgz` are the configs from before the changes below. |
 
-## Setup, from the NUC
+Port 80 on `192.168.0.144` goes to the Opta, so the D-Link's own web UI (LuCI) is only
+reachable from a LAN port, at `http://192.168.8.1/`.
 
-The NUC is the logger host and talks to everything over Wi-Fi. `nuc-wired.sh` adds a wired
-profile with IPv4 switched off, reaching the D-Link over IPv6 link-local only, so the
-logger's Wi-Fi routes are untouched while the NUC is cabled to the D-Link.
+After a power cut the Opta should pick up its address once the D-Link is back (about two
+minutes). It keeps retrying DHCP about once a minute. As a backstop, the current
+`modbus.ino` reboots the Opta if it has gone 5 minutes without an address.
 
-1. **Get these scripts onto the NUC**: `git pull` in the repo there.
-
-2. **Create the wired profile, then cable up.** Leave the Arduino plugged into the D-Link
-   and use another of its four LAN ports for the NUC (not the DSL port).
-
-   ```
-   cd dlink
-   sudo ./nuc-wired.sh up        # creates the 'dlink-setup' profile
-   # plug the NUC into a D-Link LAN port
-   ./nuc-wired.sh find           # lists the D-Link's addresses and what's listening
-   ./nuc-wired.sh status         # default route must still be the Wi-Fi interface
-   ```
-
-   `find` prints one or more `export DLINK='root@fe80::...'` lines. Use the one whose `ssh`
-   line mentions `dropbear` (OpenWrt's SSH server). The link-local address doesn't depend on
-   the D-Link's LAN IP, which the setup changes.
-
-   If nothing answers, the D-Link may still be on stock firmware or have IPv6 off. Rerun
-   with `sudo ./nuc-wired.sh up --dhcp` to take an IPv4 address from it instead. If the web
-   line says `title: DSL-2750B` or similar instead of LuCI, it's stock D-Link firmware, and
-   OpenWrt has to be flashed first.
-
-3. **Log in.** A fresh OpenWrt has no root password. If it asks for one and you don't know
-   it, see Recovery below.
-
-   ```
-   export DLINK='root@fe80::xxxx%eno1'   # from step 2
-   ssh "$DLINK"                          # check you can get in, then exit
-   ```
-
-4. **Back up and inspect** (both read-only). The backup includes the Wi-Fi password in
-   plain text, so it goes in your home directory, not the repo.
-
-   ```
-   ssh "$DLINK" 'sysupgrade -b /tmp/backup.tar.gz && cat /tmp/backup.tar.gz' > ~/dlink-backup-$(date +%F).tar.gz
-   ssh "$DLINK" sh -s < inspect.sh | tee ~/dlink-inspect.txt
-   ```
-
-   `dlink-inspect.txt` masks passwords and keys (Wi-Fi, DSL login). Paste it to Claude if
-   you want the config checked before changing anything.
-
-5. **Configure the bridge.**
-
-   ```
-   ssh "$DLINK" 'cat > /tmp/relayd-setup.sh' < relayd-setup.sh
-   ssh -t "$DLINK" WWAN_IP=192.168.0.250 sh /tmp/relayd-setup.sh
-   ```
-
-   The script:
-   - makes you set a root password first if there isn't one, because SSH and LuCI become
-     reachable from the whole main LAN
-   - keeps the existing Wi-Fi client settings or asks for the **2.4 GHz** SSID and password
-     (the DSL-2750B radio is 2.4 GHz only)
-   - turns off the D-Link's own access point
-   - installs `relayd` (and `luci-proto-relay` if LuCI is installed)
-   - moves the D-Link's LAN side to `192.168.2.1` and turns off its DHCP server there
-   - creates the relay between `lan` and the Wi-Fi client network
-   - puts both in the `lan` firewall zone
-   - saves the old config to `/root/config-before-relayd.tgz` and reboots; if it stops
-     early, the half-made changes are discarded
-
-   `WWAN_IP` gives the D-Link a fixed address on the main LAN, so it stops taking `.144`.
-   Pick one outside the main router's DHCP range; `.250` is already associated with the
-   D-Link. Leave `WWAN_IP` off to keep using DHCP. `LAN_IP` and `COUNTRY` (default `AU`)
-   can be overridden the same way.
-
-6. **Reset the Arduino** once the D-Link is back up (about two minutes), so it asks the main
-   router for an address straight away instead of holding on to one from the D-Link's old
-   LAN. Then find it:
-
-   ```
-   ./find-power-monitor.sh               # scans 192.168.0.x for /power
-   ```
-
-   Point `fetch_power_mon()` in `logger.py` at the address it finds, or reserve that address
-   for the Arduino in the main router's DHCP settings. The router sees the Arduino's own MAC
-   inside the relayed DHCP request, so a reservation should work. If the router won't honour
-   it, give the Opta a static IP in `modbus.ino` instead.
-
-7. **Clean up.** Unplug the NUC's cable first, so NetworkManager can't fall back to a
-   default wired profile that takes the default route. Then:
-
-   ```
-   sudo ./nuc-wired.sh down
-   ```
-
-## Checking on it later
-
-From the main LAN, at the D-Link's address: the `WWAN_IP` you chose, or the DHCP address
-`relayd-setup.sh` printed.
+## Checking on it
 
 ```
-ssh root@<d-link address>
-ifstatus wwan | grep -A3 ipv4-address   # Wi-Fi client link has an address
-pgrep -a relayd                          # relay running
-logread | grep -iE 'relayd|wpa'          # recent relay / Wi-Fi events
+curl http://192.168.0.144/power          # meter readings through the port forward
+ssh root@192.168.0.144                   # only from the laptop at 192.168.0.135, see the firewall rule
 ```
 
-LuCI is at `http://<d-link address>/`. After a power cut the Arduino should pick up an
-address by itself once the D-Link is back, because lwIP keeps retrying DHCP. As a backstop,
-the firmware reboots the Opta if it has gone 5 minutes without an address.
+On the D-Link:
+
+```
+ifstatus wwan | grep -A3 ipv4-address    # Wi-Fi link has an address
+cat /tmp/dhcp.leases                     # the Opta should hold 192.168.8.10
+logread | grep -iE 'wpa|dnsmasq-dhcp'    # Wi-Fi and DHCP events
+```
+
+`ssh root@192.168.0.144 sh -s < inspect.sh` prints a read-only snapshot of the config and
+state, with passwords and keys masked.
+
+To SSH in from another machine on the main LAN, change `src_ip` on the
+`Allow-SSH-from-laptop` rule, or plug into a spare LAN port on the D-Link (see Recovery).
+
+## Rebuilding from scratch
+
+On a freshly reset OpenWrt, reached from a LAN port at `ssh root@192.168.1.1`:
+
+```
+passwd
+
+# Wi-Fi client to the main router, with the D-Link's own access point off
+uci set wireless.radio0.disabled=0
+uci set wireless.default_radio0.disabled=1
+uci set wireless.wwan=wifi-iface
+uci set wireless.wwan.device=radio0
+uci set wireless.wwan.mode=sta
+uci set wireless.wwan.network=wwan
+uci set wireless.wwan.ssid='DN8245V-996D'
+uci set wireless.wwan.encryption=sae
+uci set wireless.wwan.key='<wifi password>'
+uci set network.wwan=interface
+uci set network.wwan.proto=dhcp
+uci add_list firewall.@zone[1].network=wwan    # zone[1] is 'wan' on a fresh install
+
+# LAN side: off the main LAN's 192.168.0.x, fixed address for the Opta
+uci set network.lan.ipaddr=192.168.8.1
+uci add dhcp host
+uci set dhcp.@host[-1].name=opta
+uci set dhcp.@host[-1].mac=a8:61:0a:50:4e:38
+uci set dhcp.@host[-1].ip=192.168.8.10
+
+# Port 80 on the D-Link's main-LAN address -> the Opta
+uci add firewall redirect
+uci set firewall.@redirect[-1].name=Power-monitor
+uci set firewall.@redirect[-1].target=DNAT
+uci set firewall.@redirect[-1].src=wan
+uci set firewall.@redirect[-1].src_dport=80
+uci set firewall.@redirect[-1].dest=lan
+uci set firewall.@redirect[-1].dest_ip=192.168.8.10
+uci set firewall.@redirect[-1].dest_port=80
+uci set firewall.@redirect[-1].proto=tcp
+
+uci commit && reboot
+```
+
+After the reboot the D-Link's LAN side is at `192.168.8.1`. Reset the Opta so it takes its
+lease, then check `curl http://192.168.0.144/power` from the main LAN.
 
 ## Recovery
 
-- **Undo the bridge setup:** `tar xzf /root/config-before-relayd.tgz -C / && reboot` on the
-  D-Link, or restore the backup from step 4 with `sysupgrade -r`.
-- **Lost access over Wi-Fi:** cable the NUC to a LAN port, then `sudo ./nuc-wired.sh up`
-  and `./nuc-wired.sh find`. IPv6 link-local SSH works regardless of the D-Link's IPv4
-  settings.
+- **Can't reach it over Wi-Fi:** plug a laptop into a spare LAN port. It gets a
+  `192.168.8.x` address from the D-Link. Then `ssh root@192.168.8.1`. Don't borrow the NUC's
+  only Ethernet port for this: it is the logger's connection to the main router.
+- **Undo the switch to router mode:** `tar xzf /root/config-before-router-mode.tgz -C / && reboot`
+  on the D-Link. That brings back the relayd setup described below, which didn't work with the
+  new router.
 - **Unknown root password / broken config:** boot OpenWrt into failsafe mode (hold reset
   while it boots, see the device's page on openwrt.org), then `firstboot && reboot` to wipe
-  the config and start again at step 2.
+  the config, and follow "Rebuilding from scratch".
+
+## History: why not a bridge
+
+Everything worked with the previous main router. After the router was replaced,
+the D-Link was set up as a relayd "pseudo-bridge", meant to give the Opta an
+address from the main router directly. It never worked reliably:
+
+- The Wi-Fi network was in two firewall zones, and the rejecting `wan` zone matched first.
+  So the Opta was unreachable even though relayd was running.
+- With the firewall fixed, the Opta got `192.168.0.146` through relayd and served
+  `/power` for a few minutes. Then it stopped answering even ARP on the D-Link's LAN port.
+  After a reset, its DHCP requests never got an answer from the new router through relayd.
+  The root cause wasn't pinned down.
+
+On 1 Nov 2026 relayd was removed in favour of the router-and-port-forward setup above, which
+has worked since.
+
+## Scripts in this folder
+
+- `inspect.sh`: read-only snapshot of the D-Link's config and state, with secrets masked.
+- `find-power-monitor.sh`: scans `192.168.0.x` for anything answering `/power`. It should find
+  `192.168.0.144`.
+- `relayd-setup.sh`, `nuc-wired.sh`: from the relayd attempt. `relayd-setup.sh` builds the
+  bridge setup that was abandoned. `nuc-wired.sh` reaches the D-Link from a cabled machine
+  without disturbing its main connection, but it refuses to run on the NUC because the NUC's
+  only Ethernet port is its main connection.

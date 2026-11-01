@@ -99,7 +99,7 @@ sudo systemctl start suburban-backup.service  # run now, out of schedule
 
 # Misc
 
-The Arduino reaches the network through an old D-Link DSL-2750B running OpenWrt as a Wi-Fi bridge; setup and recovery are in [`dlink/README.md`](dlink/README.md).
+The Arduino reaches the network through an old D-Link DSL-2750B running OpenWrt, which joins the Wi-Fi and forwards port 80 on `192.168.0.144` to the Arduino; setup and recovery are in [`dlink/README.md`](dlink/README.md).
 
 For some reason, I needed to run this to allow the NUC to see the battery interface.
 `sudo ip neigh replace 192.168.0.137 lladdr 94:51:dc:20:87:04 dev wlp58s0`

@@ -1,10 +1,15 @@
 #!/bin/sh
-# Read-only snapshot of the D-Link's OpenWrt config and state. Wi-Fi keys are masked,
-# so the output is safe to paste into a chat or issue.
+# Read-only snapshot of the D-Link's OpenWrt config and state. Passwords and keys
+# (Wi-Fi, PPPoE/DSL login, EAP, RADIUS, WireGuard) are masked, so the output is safe to
+# paste into a chat or issue.
 #
 # usage (from the NUC): ssh "$DLINK" sh -s < inspect.sh | tee ~/dlink-inspect.txt
 
 section() { printf '\n### %s\n' "$*"; }
+
+mask() {
+	sed -E "s/^([^=]*\.(key[0-9]*|[a-z_]*password|passphrase|[a-z_]*secret|[a-z_]*psk|private_key|username)=).*/\1'********'/"
+}
 
 section release
 cat /etc/openwrt_release 2>/dev/null || echo "no /etc/openwrt_release - not OpenWrt?"
@@ -20,11 +25,11 @@ if command -v apk >/dev/null 2>&1; then apk list --installed 2>/dev/null; else o
 	grep -E '^(relayd|luci-proto-relay|luci-base|wpad|hostapd|kmod-b43|b43|kmod-mac80211|dnsmasq|firewall)' ||
 	echo "(none of the interesting ones)"
 
-section "uci network"
-uci show network
+section "uci network (secrets masked)"
+uci show network | mask
 
-section "uci wireless (keys masked)"
-uci show wireless | sed "s/\(\.key=\).*/\1'********'/"
+section "uci wireless (secrets masked)"
+uci show wireless | mask
 
 section "uci firewall zones"
 uci show firewall | grep -E '@zone|@forwarding'

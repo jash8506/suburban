@@ -50,30 +50,17 @@ String registers[REG_COUNT] = {
 bool is_signed[REG_COUNT] = { false, true, true, false, true, false, false };
 #define DEBUG_MODE false
 
-// Pause between DHCP attempts while the Opta has no address.
-#define ETHERNET_RETRY_MS 30000
-unsigned long lastEthernetAttempt = 0;
+// Reboot if the Opta has had no IP address for this long. lwIP should keep retrying
+// DHCP in the background when the network (the Wi-Fi bridge) comes up after the Opta,
+// but a reset is a sure way back if it doesn't.
+#define NO_ADDRESS_RESET_MS (5UL * 60 * 1000)
+unsigned long lastHadAddress = 0;
 
-bool hasAddress() {
-  return !(Ethernet.localIP() == IPAddress(0, 0, 0, 0));
-}
-
-// Get a DHCP lease and start the web server. Ethernet.begin() only tries once, so
-// loop() calls this again while there's no address - after a power cut the Wi-Fi
-// bridge can take longer to come up than the Opta.
-void connectEthernet() {
-  bool ok = Ethernet.begin();
-  lastEthernetAttempt = millis();
-  if (!ok) {
-    if (DEBUG_MODE) {
-      Serial.println("No DHCP lease yet, will retry");
-    }
-    return;
-  }
-  server.begin();
-  if (DEBUG_MODE) {
-    Serial.print("Server is ready. Please connect to http://");
-    Serial.println(Ethernet.localIP());
+void resetIfOffline() {
+  if (!(Ethernet.localIP() == IPAddress(0, 0, 0, 0))) {
+    lastHadAddress = millis();
+  } else if (millis() - lastHadAddress > NO_ADDRESS_RESET_MS) {
+    NVIC_SystemReset();
   }
 }
 
@@ -95,15 +82,25 @@ void setup() {
       ;
   }
 
-  connectEthernet();
+  // start the Ethernet connection:
+  if (!Ethernet.begin()) {
+    Serial.println("Failed to initialize Ethernet library");
+    return;
+  }
+
+  // Start to listen
+  server.begin();
+  if (DEBUG_MODE) {
+    Serial.println(("Server is ready."));
+    Serial.print("Please connect to http://");
+    Serial.println(Ethernet.localIP());
+  }
   Serial.end();
 }
 
 void loop() {
   Ethernet.maintain();
-  if (!hasAddress() && millis() - lastEthernetAttempt >= ETHERNET_RETRY_MS) {
-    connectEthernet();
-  }
+  resetIfOffline();
   if (!server) {
     server.begin();
   }
